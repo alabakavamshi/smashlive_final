@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Platform; // Added for platform detection
+import 'dart:io' show Platform;
 import 'package:country_code_picker/country_code_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -8,13 +8,12 @@ import 'package:game_app/auth_pages/basic_info_page.dart';
 import 'package:game_app/blocs/auth/auth_bloc.dart';
 import 'package:game_app/blocs/auth/auth_event.dart';
 import 'package:game_app/blocs/auth/auth_state.dart';
-import 'package:game_app/models/user_model.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:flutter_staggered_animations/flutter_staggered_animations.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart' as firebase_auth;
 import 'package:toastification/toastification.dart';
-import 'package:firebase_app_check/firebase_app_check.dart'; // Firebase App Check
+import 'package:firebase_app_check/firebase_app_check.dart';
 
 class SignupPage extends StatefulWidget {
   const SignupPage({super.key});
@@ -38,6 +37,7 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
   bool _obscurePassword = true;
   bool _obscureConfirmPassword = true;
   bool _isLoading = false;
+  bool _hasNavigated = false;
   bool _hasMinLength = false;
   bool _hasUppercase = false;
   bool _hasNumber = false;
@@ -70,21 +70,19 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
       vsync: this,
     )..forward();
     _testFirestoreConnectivity();
-    _initializeAppCheck(); // Initialize App Check
+    _initializeAppCheck();
   }
 
   Future<void> _initializeAppCheck() async {
     try {
       if (Platform.isIOS) {
-        
         await FirebaseAppCheck.instance.activate(
-          appleProvider: kDebugMode ? AppleProvider.debug : AppleProvider.appAttest,  );
+          appleProvider: kDebugMode ? AppleProvider.debug : AppleProvider.appAttest,
+        );
         debugPrint('App Check activated with App Attest for iOS');
       } else if (Platform.isAndroid) {
-        // For Android, use Play Integrity
         await FirebaseAppCheck.instance.activate(
-          androidProvider: AndroidProvider.playIntegrity, // Use Play Integrity for production
-          // androidProvider: AndroidProvider.debug, // Uncomment for debug builds (requires debug token)
+          androidProvider: AndroidProvider.playIntegrity,
         );
         debugPrint('App Check activated with Play Integrity for Android');
       } else {
@@ -119,6 +117,7 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
       _hasUppercase = false;
       _hasNumber = false;
       _hasSpecialChar = false;
+      _hasNavigated = false;
     });
     debugPrint('All signup data reset');
   }
@@ -229,8 +228,9 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
   }
 
   void _navigateToBasicInfoPage(String uid, bool isPhoneSignup, String email, String phone, String role) {
+    debugPrint('Navigating to BasicInfoPage for UID: $uid, role: $role, isPhoneSignup: $isPhoneSignup');
     if (!mounted) return;
-    Navigator.push(
+    Navigator.pushReplacement(
       context,
       MaterialPageRoute(
         builder: (context) => BasicInfoPage(
@@ -244,28 +244,6 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
     );
   }
 
-  void _navigateBasedOnRole(String role, AppUser appUser) {
-    if (!mounted) return;
-    if (appUser.isProfileComplete) {
-      String route;
-      switch (role) {
-        case 'player':
-          route = '/player';
-          break;
-        case 'organizer':
-          route = '/organizer';
-          break;
-        case 'umpire':
-          route = '/umpire';
-          break;
-        default:
-          route = '/login';
-      }
-      Navigator.pushNamedAndRemoveUntil(context, route, (route) => false);
-    } else {
-      _navigateToBasicInfoPage(appUser.uid, appUser.phone != null, appUser.email ?? '', appUser.phone ?? '', appUser.role);
-    }
-  }
 
   Future<void> _handleSignupButtonPress() async {
     if (!mounted || _isLoading || _authBloc == null) return;
@@ -374,6 +352,7 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
         return;
       }
 
+      setState(() => _isLoading = true);
       _authBloc!.add(
         AuthSignupEvent(
           email: email,
@@ -384,6 +363,7 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
     } catch (e, stackTrace) {
       debugPrint('handleEmailSignup error: $e\nStack: $stackTrace');
       if (mounted) {
+        setState(() => _isLoading = false);
         toastification.show(
           context: context,
           type: ToastificationType.error,
@@ -771,6 +751,7 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
     return Row(
       children: [
         Container(
+          width: 120,
           decoration: BoxDecoration(
             color: _inputBackground,
             borderRadius: const BorderRadius.only(
@@ -783,6 +764,7 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
             onChanged: (CountryCode country) {
               setState(() {
                 _selectedCountry = country;
+                debugPrint('Country selected: ${country.name} at ${DateTime.now()}');
               });
             },
             initialSelection: 'IN',
@@ -1070,21 +1052,21 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
             description: Text('Code sent to ${_normalizePhoneNumber(_phoneController.text.trim())}'),
             autoCloseDuration: const Duration(seconds: 2),
           );
-        } else if (state is AuthAuthenticated) {
-          setState(() => _isLoading = false);
+        } else if (state is AuthAuthenticated && !_hasNavigated) {
+          setState(() {
+            _isLoading = false;
+            _hasNavigated = true;
+          });
           final user = state.user;
 
-          if (state.appUser != null && state.appUser!.isProfileComplete) {
-            _navigateBasedOnRole(state.appUser!.role, state.appUser!);
-          } else {
-            _navigateToBasicInfoPage(
-              user.uid,
-              _usePhone,
-              _usePhone ? '' : _emailController.text.trim(),
-              _usePhone ? _normalizePhoneNumber(_phoneController.text.trim()) : '',
-              _selectedRole!,
-            );
-          }
+          // Navigate to basic info page for both email and phone signup
+          _navigateToBasicInfoPage(
+            user.uid,
+            _usePhone,
+            _usePhone ? '' : _emailController.text.trim(),
+            _usePhone ? _normalizePhoneNumber(_phoneController.text.trim()) : '',
+            _selectedRole!,
+          );
         } else if (state is AuthError) {
           setState(() => _isLoading = false);
           if (mounted) {
@@ -1117,6 +1099,7 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
                   const SizedBox(height: 24),
                   _buildSignupButton(),
                   const SizedBox(height: 24),
+                 
                   _buildLoginPrompt(),
                 ],
               ),
@@ -1130,7 +1113,7 @@ class _SignupPageState extends State<SignupPage> with TickerProviderStateMixin {
 
 class EmailVerificationPage extends StatefulWidget {
   final firebase_auth.User user;
-  final void Function(String) onVerified; // Explicitly define as void Function(String)
+  final void Function(String) onVerified;
 
   const EmailVerificationPage({
     super.key,
@@ -1360,7 +1343,7 @@ class _EmailVerificationPageState extends State<EmailVerificationPage> with Tick
                               : () async {
                                   bool isVerified = await _checkEmailVerification();
                                   if (isVerified && mounted) {
-                                    widget.onVerified(widget.user.uid); // Pass uid to callback
+                                    widget.onVerified(widget.user.uid);
                                   }
                                 },
                           style: ElevatedButton.styleFrom(

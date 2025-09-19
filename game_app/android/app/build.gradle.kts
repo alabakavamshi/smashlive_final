@@ -22,7 +22,7 @@ android {
     ndkVersion = "27.0.12077973"
 
     defaultConfig {
-        applicationId = "com.SmashLive.game_app"
+        applicationId = "com.smashlive.gameapp"
         minSdk = 23
         targetSdk = 35
         versionCode = 8

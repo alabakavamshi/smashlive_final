@@ -320,3 +320,11 @@
 //     return '${this[0].toUpperCase()}${substring(1).toLowerCase()}';
 //   }
 // }
+
+// match: match,
+//                                   tournamentId: widget.tournament.id,
+//                                   isCreator: isCreator,
+//                                   isUmpire: _isUmpire,
+//                                   isDoubles: isDoubles,
+//                                   matchIndex: index, // Pass the matchIndex
+//                                   onDeleteMatch: () => _deleteMatch(index),

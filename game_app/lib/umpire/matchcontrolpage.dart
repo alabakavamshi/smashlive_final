@@ -47,12 +47,14 @@ class _MatchControlPageState extends State<MatchControlPage>
   Timer? _countdownTimer;
   bool _canStartMatch = false;
   String? _tournamentTimezone;
+  String? _matchId; // Added to store matchId for subcollection reference
 
   @override
   void initState() {
     super.initState();
     tz.initializeTimeZones();
     _match = Map.from(widget.match);
+    _matchId = _match['matchId']; // Assuming match has 'matchId' field
     _initializeMatchStartTime().then((_) {
       _lastTeam1Score = _getCurrentScore(true);
       _lastTeam2Score = _getCurrentScore(false);
@@ -74,8 +76,7 @@ class _MatchControlPageState extends State<MatchControlPage>
   }
 
   Future<void> _initializeMatchStartTime() async {
-    if (_match['startTime'] != null) {
-      final startTime = (_match['startTime'] as Timestamp).toDate();
+    try {
       final tournamentDoc = await FirebaseFirestore.instance
           .collection('tournaments')
           .doc(widget.tournamentId)
@@ -83,41 +84,31 @@ class _MatchControlPageState extends State<MatchControlPage>
       final data = tournamentDoc.data();
       final timezoneName = data?['timezone'] as String? ?? 'UTC';
       final timezone = tz.getLocation(timezoneName);
+
+      // Get match start time from subcollection
+      final matchDoc = await FirebaseFirestore.instance
+          .collection('tournaments')
+          .doc(widget.tournamentId)
+          .collection('matches')
+          .doc(_matchId)
+          .get();
+      final matchData = matchDoc.data();
+      final startTime = matchData?['startTime'] as Timestamp?;
+
       setState(() {
-        _matchStartTime = tz.TZDateTime.from(startTime, timezone);
+        if (startTime != null) {
+          _matchStartTime = tz.TZDateTime.from(startTime.toDate(), timezone);
+        } else {
+          final now = tz.TZDateTime.now(timezone).add(const Duration(minutes: 5));
+          _matchStartTime = now;
+        }
         _tournamentTimezone = timezoneName;
       });
-      return;
-    }
-    final tournamentDoc = await FirebaseFirestore.instance
-        .collection('tournaments')
-        .doc(widget.tournamentId)
-        .get();
-    final data = tournamentDoc.data();
-    final startDate = data?['startDate'] as Timestamp?;
-    final startTimeData = data?['startTime'] as Map<String, dynamic>?;
-    final timezoneName = data?['timezone'] as String? ?? 'UTC';
-    final timezone = tz.getLocation(timezoneName);
-    if (startDate != null && startTimeData != null) {
-      final startDateTime = tz.TZDateTime.from(startDate.toDate(), timezone);
-      final hour = startTimeData['hour'] as int? ?? 0;
-      final minute = startTimeData['minute'] as int? ?? 0;
+    } catch (e) {
+      debugPrint('Error initializing match start time: $e');
       setState(() {
-        _matchStartTime = tz.TZDateTime(
-          timezone,
-          startDateTime.year,
-          startDateTime.month,
-          startDateTime.day,
-          hour,
-          minute,
-        );
-        _tournamentTimezone = timezoneName;
-      });
-    } else {
-      final now = tz.TZDateTime.now(timezone).add(const Duration(minutes: 5));
-      setState(() {
-        _matchStartTime = now;
-        _tournamentTimezone = timezoneName;
+        _tournamentTimezone = 'UTC';
+        _matchStartTime = tz.TZDateTime.now(tz.UTC).add(const Duration(minutes: 5));
       });
     }
   }
@@ -129,56 +120,57 @@ class _MatchControlPageState extends State<MatchControlPage>
     super.dispose();
   }
 
- void _startCountdown() {
-  if (_match['liveScores']?['isLive'] == true || _match['completed'] == true) {
+  void _startCountdown() {
+    if (_match['liveScores']?['isLive'] == true || _match['completed'] == true) {
+      setState(() {
+        _countdown = null;
+      });
+      _countdownTimer?.cancel();
+      return;
+    }
+    if (_matchStartTime == null || _tournamentTimezone == null) {
+      setState(() {
+        _countdown = 'Start time not scheduled';
+      });
+      _countdownTimer?.cancel();
+      return;
+    }
     setState(() {
       _countdown = null;
     });
     _countdownTimer?.cancel();
-    return;
-  }
-  if (_matchStartTime == null || _tournamentTimezone == null) {
-    setState(() {
-      _countdown = 'Start time not scheduled';
+    _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
+      if (!mounted) {
+        timer.cancel();
+        return;
+      }
+      final now = tz.TZDateTime.now(tz.getLocation(_tournamentTimezone!));
+      final difference = _matchStartTime!.difference(now);
+      if (difference.isNegative) {
+        setState(() {
+          _countdown = 'Match should have started';
+          _canStartMatch = true;
+        });
+        timer.cancel();
+      } else if (difference.inHours >= 24) {
+        final days = difference.inDays;
+        final hours = (difference.inHours % 24) + (difference.inMinutes % 60 >= 30 ? 1 : 0); // Round up if minutes >= 30
+        setState(() {
+          _countdown = '${days}d ${hours}h';
+          _canStartMatch = false;
+        });
+      } else {
+        final hours = difference.inHours;
+        final minutes = difference.inMinutes % 60;
+        final seconds = difference.inSeconds % 60;
+        setState(() {
+          _countdown = '${hours}h ${minutes}m ${seconds}s';
+          _canStartMatch = false;
+        });
+      }
     });
-    _countdownTimer?.cancel();
-    return;
   }
-  setState(() {
-    _countdown = null;
-  });
-  _countdownTimer?.cancel();
-  _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
-    if (!mounted) {
-      timer.cancel();
-      return;
-    }
-    final now = tz.TZDateTime.now(tz.getLocation(_tournamentTimezone!));
-    final difference = _matchStartTime!.difference(now);
-    if (difference.isNegative) {
-      setState(() {
-        _countdown = 'Match should have started';
-        _canStartMatch = true;
-      });
-      timer.cancel();
-    } else if (difference.inHours >= 24) {
-      final days = difference.inDays;
-      final hours = (difference.inHours % 24) + (difference.inMinutes % 60 >= 30 ? 1 : 0); // Round up if minutes >= 30
-      setState(() {
-        _countdown = '${days}d ${hours}h';
-        _canStartMatch = false;
-      });
-    } else {
-      final hours = difference.inHours;
-      final minutes = difference.inMinutes % 60;
-      final seconds = difference.inSeconds % 60;
-      setState(() {
-        _countdown = '${hours}h ${minutes}m ${seconds}s';
-        _canStartMatch = false;
-      });
-    }
-  });
-}
+
   int _getCurrentScore(bool isTeam1) {
     final liveScores = _match['liveScores'] ?? {};
     final currentGame = liveScores['currentGame'] ?? 1;
@@ -223,57 +215,53 @@ class _MatchControlPageState extends State<MatchControlPage>
     FirebaseFirestore.instance
         .collection('tournaments')
         .doc(widget.tournamentId)
+        .collection('matches')
+        .doc(_matchId)
         .snapshots()
         .listen((snapshot) {
-          final data = snapshot.data();
-          if (data != null && mounted) {
-            if (data['matches'] != null) {
-              final matches = List<Map<String, dynamic>>.from(data['matches']);
-              if (matches.length > widget.matchIndex) {
-                final newMatch = matches[widget.matchIndex];
-                final newStartTime = newMatch['startTime'] as Timestamp?;
-                if (newStartTime != null && _tournamentTimezone != null) {
-                  final timezone = tz.getLocation(_tournamentTimezone!);
-                  final newStartTimeTZ = tz.TZDateTime.from(newStartTime.toDate(), timezone);
-                  if (_matchStartTime != newStartTimeTZ) {
-                    setState(() {
-                      _matchStartTime = newStartTimeTZ;
-                    });
-                    _startCountdown();
-                  }
-                }
-                final newTeam1Score = _getCurrentScoreFromMatch(newMatch, true);
-                final newTeam2Score = _getCurrentScoreFromMatch(newMatch, false);
-                if (newTeam1Score > (_lastTeam1Score ?? 0)) {
-                  setState(() {
-                    _showPlusOneTeam1 = true;
-                    _animationController.forward().then((_) {
-                      _animationController.reverse();
-                      Future.delayed(const Duration(milliseconds: 100), () {
-                        if (mounted) setState(() => _showPlusOneTeam1 = false);
-                      });
-                    });
-                  });
-                } else if (newTeam2Score > (_lastTeam2Score ?? 0)) {
-                  setState(() {
-                    _showPlusOneTeam2 = true;
-                    _animationController.forward().then((_) {
-                      _animationController.reverse();
-                      Future.delayed(const Duration(milliseconds: 100), () {
-                        if (mounted) setState(() => _showPlusOneTeam2 = false);
-                      });
-                    });
-                  });
-                }
+          if (snapshot.exists && mounted) {
+            final newMatch = snapshot.data()!;
+            final newStartTime = newMatch['startTime'] as Timestamp?;
+            if (newStartTime != null && _tournamentTimezone != null) {
+              final timezone = tz.getLocation(_tournamentTimezone!);
+              final newStartTimeTZ = tz.TZDateTime.from(newStartTime.toDate(), timezone);
+              if (_matchStartTime != newStartTimeTZ) {
                 setState(() {
-                  _match = newMatch;
-                  _lastTeam1Score = newTeam1Score;
-                  _lastTeam2Score = newTeam2Score;
-                  _checkSetCompletion();
-                  _initializeServer();
+                  _matchStartTime = newStartTimeTZ;
                 });
+                _startCountdown();
               }
             }
+            final newTeam1Score = _getCurrentScoreFromMatch(newMatch, true);
+            final newTeam2Score = _getCurrentScoreFromMatch(newMatch, false);
+            if (newTeam1Score > (_lastTeam1Score ?? 0)) {
+              setState(() {
+                _showPlusOneTeam1 = true;
+                _animationController.forward().then((_) {
+                  _animationController.reverse();
+                  Future.delayed(const Duration(milliseconds: 100), () {
+                    if (mounted) setState(() => _showPlusOneTeam1 = false);
+                  });
+                });
+              });
+            } else if (newTeam2Score > (_lastTeam2Score ?? 0)) {
+              setState(() {
+                _showPlusOneTeam2 = true;
+                _animationController.forward().then((_) {
+                  _animationController.reverse();
+                  Future.delayed(const Duration(milliseconds: 100), () {
+                    if (mounted) setState(() => _showPlusOneTeam2 = false);
+                  });
+                });
+              });
+            }
+            setState(() {
+              _match = newMatch;
+              _lastTeam1Score = newTeam1Score;
+              _lastTeam2Score = newTeam2Score;
+              _checkSetCompletion();
+              _initializeServer();
+            });
           }
         });
   }
@@ -306,13 +294,12 @@ class _MatchControlPageState extends State<MatchControlPage>
       _isLoading = true;
     });
     try {
-      final tournamentDoc = await FirebaseFirestore.instance
+      await FirebaseFirestore.instance
           .collection('tournaments')
           .doc(widget.tournamentId)
-          .get();
-      final matches = List<Map<String, dynamic>>.from(tournamentDoc.data()!['matches']);
-      matches[widget.matchIndex] = {
-        ..._match,
+          .collection('matches')
+          .doc(_matchId)
+          .update({
         'liveScores': {
           'isLive': true,
           'startTime': Timestamp.now(),
@@ -321,41 +308,30 @@ class _MatchControlPageState extends State<MatchControlPage>
           widget.isDoubles ? 'team2' : 'player2': [0, 0, 0],
           'currentServer': widget.isDoubles ? 'team1' : 'player1',
         },
-      };
-      await FirebaseFirestore.instance
-          .collection('tournaments')
-          .doc(widget.tournamentId)
-          .update({'matches': matches});
-      setState(() {
-        _match = matches[widget.matchIndex];
-        _currentServer = widget.isDoubles ? 'team1' : 'player1';
-        _lastServer = _currentServer;
+        'lastUpdated': FieldValue.serverTimestamp(),
       });
-      if (mounted) {
-        toastification.show(
-          context: context,
-          type: ToastificationType.success,
-          title: Text('Match Started', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          description: Text('The match has started successfully.', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          autoCloseDuration: const Duration(seconds: 2),
-          backgroundColor: const Color(0xFF2A9D8F),
-          foregroundColor: const Color(0xFFFDFCFB),
-          alignment: Alignment.bottomCenter,
-        );
-      }
+
+      toastification.show(
+        context: context,
+        type: ToastificationType.success,
+        title: Text('Match Started', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        description: Text('The match has started successfully.', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        autoCloseDuration: const Duration(seconds: 2),
+        backgroundColor: const Color(0xFF2A9D8F),
+        foregroundColor: const Color(0xFFFDFCFB),
+        alignment: Alignment.bottomCenter,
+      );
     } catch (e) {
-      if (mounted) {
-        toastification.show(
-          context: context,
-          type: ToastificationType.error,
-          title: Text('Error', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          description: Text('Failed to start match: $e', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          autoCloseDuration: const Duration(seconds: 2),
-          backgroundColor: const Color(0xFFE76F51),
-          foregroundColor: const Color(0xFFFDFCFB),
-          alignment: Alignment.bottomCenter,
-        );
-      }
+      toastification.show(
+        context: context,
+        type: ToastificationType.error,
+        title: Text('Error', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        description: Text('Failed to start match: $e', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        autoCloseDuration: const Duration(seconds: 2),
+        backgroundColor: const Color(0xFFE76F51),
+        foregroundColor: const Color(0xFFFDFCFB),
+        alignment: Alignment.bottomCenter,
+      );
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -367,18 +343,10 @@ class _MatchControlPageState extends State<MatchControlPage>
       _isLoading = true;
     });
     try {
-      final tournamentDoc = await FirebaseFirestore.instance
-          .collection('tournaments')
-          .doc(widget.tournamentId)
-          .get();
-      final updatedMatches =
-          List<Map<String, dynamic>>.from(tournamentDoc.data()!['matches']);
       final currentScores = Map<String, dynamic>.from(_match['liveScores']);
       final currentGame = currentScores['currentGame'] as int;
-      final key =
-          isTeam1 ? (widget.isDoubles ? 'team1' : 'player1') : (widget.isDoubles ? 'team2' : 'player2');
-      final opponentKey =
-          !isTeam1 ? (widget.isDoubles ? 'team1' : 'player1') : (widget.isDoubles ? 'team2' : 'player2');
+      final key = isTeam1 ? (widget.isDoubles ? 'team1' : 'player1') : (widget.isDoubles ? 'team2' : 'player2');
+      final opponentKey = !isTeam1 ? (widget.isDoubles ? 'team1' : 'player1') : (widget.isDoubles ? 'team2' : 'player2');
       final scores = List<int>.from(currentScores[key]);
       final opponentScores = List<int>.from(currentScores[opponentKey]);
       scores[currentGame - 1]++;
@@ -387,37 +355,32 @@ class _MatchControlPageState extends State<MatchControlPage>
       _lastTeam2Score = List<int>.from(currentScores[widget.isDoubles ? 'team2' : 'player2'])[currentGame - 1];
       _currentServer = key;
       _lastServer = _currentServer;
-      updatedMatches[widget.matchIndex] = {
-        ..._match,
+
+      await FirebaseFirestore.instance
+          .collection('tournaments')
+          .doc(widget.tournamentId)
+          .collection('matches')
+          .doc(_matchId)
+          .update({
         'liveScores': {
           ...currentScores,
           key: scores,
           opponentKey: opponentScores,
           'currentServer': _currentServer,
         },
-      };
-      await FirebaseFirestore.instance
-          .collection('tournaments')
-          .doc(widget.tournamentId)
-          .update({'matches': updatedMatches});
-      setState(() {
-        _match = updatedMatches[widget.matchIndex];
-        _checkSetCompletion();
-        _initializeServer();
+        'lastUpdated': FieldValue.serverTimestamp(),
       });
     } catch (e) {
-      if (mounted) {
-        toastification.show(
-          context: context,
-          type: ToastificationType.error,
-          title: Text('Update Failed', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          description: Text('Failed to update score: $e', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          autoCloseDuration: const Duration(seconds: 2),
-          backgroundColor: const Color(0xFFE76F51),
-          foregroundColor: const Color(0xFFFDFCFB),
-          alignment: Alignment.bottomCenter,
-        );
-      }
+      toastification.show(
+        context: context,
+        type: ToastificationType.error,
+        title: Text('Update Failed', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        description: Text('Failed to update score: $e', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        autoCloseDuration: const Duration(seconds: 2),
+        backgroundColor: const Color(0xFFE76F51),
+        foregroundColor: const Color(0xFFFDFCFB),
+        alignment: Alignment.bottomCenter,
+      );
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -429,52 +392,40 @@ class _MatchControlPageState extends State<MatchControlPage>
       _isLoading = true;
     });
     try {
-      final tournamentDoc = await FirebaseFirestore.instance
-          .collection('tournaments')
-          .doc(widget.tournamentId)
-          .get();
-      final updatedMatches =
-          List<Map<String, dynamic>>.from(tournamentDoc.data()!['matches']);
       final currentScores = Map<String, dynamic>.from(_match['liveScores']);
       final currentGame = currentScores['currentGame'] as int;
-      final key =
-          isTeam1 ? (widget.isDoubles ? 'team1' : 'player1') : (widget.isDoubles ? 'team2' : 'player2');
+      final key = isTeam1 ? (widget.isDoubles ? 'team1' : 'player1') : (widget.isDoubles ? 'team2' : 'player2');
       final scores = List<int>.from(currentScores[key]);
       scores[currentGame - 1]--;
       scores[currentGame - 1] = scores[currentGame - 1].clamp(0, 30);
       _lastTeam1Score = List<int>.from(currentScores[widget.isDoubles ? 'team1' : 'player1'])[currentGame - 1];
       _lastTeam2Score = List<int>.from(currentScores[widget.isDoubles ? 'team2' : 'player2'])[currentGame - 1];
       _lastServer = _currentServer;
-      updatedMatches[widget.matchIndex] = {
-        ..._match,
+
+      await FirebaseFirestore.instance
+          .collection('tournaments')
+          .doc(widget.tournamentId)
+          .collection('matches')
+          .doc(_matchId)
+          .update({
         'liveScores': {
           ...currentScores,
           key: scores,
           'currentServer': _currentServer,
         },
-      };
-      await FirebaseFirestore.instance
-          .collection('tournaments')
-          .doc(widget.tournamentId)
-          .update({'matches': updatedMatches});
-      setState(() {
-        _match = updatedMatches[widget.matchIndex];
-        _checkSetCompletion();
-        _initializeServer();
+        'lastUpdated': FieldValue.serverTimestamp(),
       });
     } catch (e) {
-      if (mounted) {
-        toastification.show(
-          context: context,
-          type: ToastificationType.error,
-          title: Text('Update Failed', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          description: Text('Failed to update score: $e', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          autoCloseDuration: const Duration(seconds: 2),
-          backgroundColor: const Color(0xFFE76F51),
-          foregroundColor: const Color(0xFFFDFCFB),
-          alignment: Alignment.bottomCenter,
-        );
-      }
+      toastification.show(
+        context: context,
+        type: ToastificationType.error,
+        title: Text('Update Failed', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        description: Text('Failed to update score: $e', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        autoCloseDuration: const Duration(seconds: 2),
+        backgroundColor: const Color(0xFFE76F51),
+        foregroundColor: const Color(0xFFFDFCFB),
+        alignment: Alignment.bottomCenter,
+      );
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -537,12 +488,6 @@ class _MatchControlPageState extends State<MatchControlPage>
       _isLoading = true;
     });
     try {
-      final tournamentDoc = await FirebaseFirestore.instance
-          .collection('tournaments')
-          .doc(widget.tournamentId)
-          .get();
-      final updatedMatches =
-          List<Map<String, dynamic>>.from(tournamentDoc.data()!['matches']);
       final currentScores = Map<String, dynamic>.from(_match['liveScores'] ?? {});
       final currentGame = currentScores['currentGame'] as int? ?? 1;
       final team1Scores = List<int>.from(
@@ -572,6 +517,11 @@ class _MatchControlPageState extends State<MatchControlPage>
         terminationReason = 'Match terminated manually without a winner';
       }
 
+      // Update tournament participants
+      final tournamentDoc = await FirebaseFirestore.instance
+          .collection('tournaments')
+          .doc(widget.tournamentId)
+          .get();
       List<Map<String, dynamic>> updatedParticipants =
           List<Map<String, dynamic>>.from(tournamentDoc.data()!['participants'] ?? []);
       if (winner != null) {
@@ -593,10 +543,20 @@ class _MatchControlPageState extends State<MatchControlPage>
           }
           return p;
         }).toList();
+
+        await FirebaseFirestore.instance
+            .collection('tournaments')
+            .doc(widget.tournamentId)
+            .update({'participants': updatedParticipants});
       }
 
-      updatedMatches[widget.matchIndex] = {
-        ..._match,
+      // Update match in subcollection
+      await FirebaseFirestore.instance
+          .collection('tournaments')
+          .doc(widget.tournamentId)
+          .collection('matches')
+          .doc(_matchId)
+          .update({
         'completed': true,
         'winner': winner,
         'terminationReason': terminationReason,
@@ -605,49 +565,35 @@ class _MatchControlPageState extends State<MatchControlPage>
           'isLive': false,
           'endTime': Timestamp.now(),
         },
-      };
-      await FirebaseFirestore.instance
-          .collection('tournaments')
-          .doc(widget.tournamentId)
-          .update({
-        'participants': updatedParticipants,
-        'matches': updatedMatches,
+        'lastUpdated': FieldValue.serverTimestamp(),
       });
-      setState(() {
-        _match = updatedMatches[widget.matchIndex];
-        _countdownTimer?.cancel();
-        _countdown = null;
-      });
-      if (mounted) {
-        toastification.show(
-          context: context,
-          type: ToastificationType.success,
-          title: Text('Match Terminated', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          description: Text(
-            winner != null
-                ? 'Winner: ${winner == 'team1' || winner == 'player1' ? (widget.isDoubles ? _match['team1'].join(', ') : _match['player1']) : (widget.isDoubles ? _match['team2'].join(', ') : _match['player2'])}'
-                : 'Match terminated without a winner: $terminationReason',
-            style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB)),
-          ),
-          autoCloseDuration: const Duration(seconds: 3),
-          backgroundColor: const Color(0xFF2A9D8F),
-          foregroundColor: const Color(0xFFFDFCFB),
-          alignment: Alignment.bottomCenter,
-        );
-      }
+
+      toastification.show(
+        context: context,
+        type: ToastificationType.success,
+        title: Text('Match Terminated', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        description: Text(
+          winner != null
+              ? 'Winner: ${winner == 'team1' || winner == 'player1' ? (widget.isDoubles ? _match['team1'].join(', ') : _match['player1']) : (widget.isDoubles ? _match['team2'].join(', ') : _match['player2'])}'
+              : 'Match terminated without a winner: $terminationReason',
+          style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB)),
+        ),
+        autoCloseDuration: const Duration(seconds: 3),
+        backgroundColor: const Color(0xFF2A9D8F),
+        foregroundColor: const Color(0xFFFDFCFB),
+        alignment: Alignment.bottomCenter,
+      );
     } catch (e) {
-      if (mounted) {
-        toastification.show(
-          context: context,
-          type: ToastificationType.error,
-          title: Text('Error', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          description: Text('Failed to terminate match: $e', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          autoCloseDuration: const Duration(seconds: 3),
-          backgroundColor: const Color(0xFFE76F51),
-          foregroundColor: const Color(0xFFFDFCFB),
-          alignment: Alignment.bottomCenter,
-        );
-      }
+      toastification.show(
+        context: context,
+        type: ToastificationType.error,
+        title: Text('Error', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        description: Text('Failed to terminate match: $e', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        autoCloseDuration: const Duration(seconds: 3),
+        backgroundColor: const Color(0xFFE76F51),
+        foregroundColor: const Color(0xFFFDFCFB),
+        alignment: Alignment.bottomCenter,
+      );
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }
@@ -659,12 +605,6 @@ class _MatchControlPageState extends State<MatchControlPage>
       _isLoading = true;
     });
     try {
-      final tournamentDoc = await FirebaseFirestore.instance
-          .collection('tournaments')
-          .doc(widget.tournamentId)
-          .get();
-      final updatedMatches =
-          List<Map<String, dynamic>>.from(tournamentDoc.data()!['matches']);
       final currentScores = Map<String, dynamic>.from(_match['liveScores']);
       final currentGame = currentScores['currentGame'] as int;
       int team1Wins = 0;
@@ -685,24 +625,27 @@ class _MatchControlPageState extends State<MatchControlPage>
         return;
       }
       if (currentGame >= 3) {
-        if (mounted) {
-          toastification.show(
-            context: context,
-            type: ToastificationType.warning,
-            title: Text('Match Limit Reached', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-            description: Text('Maximum sets (3) reached. Please end the match.', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-            autoCloseDuration: const Duration(seconds: 2),
-            backgroundColor: const Color(0xFFE9C46A),
-            foregroundColor: const Color(0xFFFDFCFB),
-            alignment: Alignment.bottomCenter,
-          );
-        }
+        toastification.show(
+          context: context,
+          type: ToastificationType.warning,
+          title: Text('Match Limit Reached', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+          description: Text('Maximum sets (3) reached. Please end the match.', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+          autoCloseDuration: const Duration(seconds: 2),
+          backgroundColor: const Color(0xFFE9C46A),
+          foregroundColor: const Color(0xFFFDFCFB),
+          alignment: Alignment.bottomCenter,
+        );
         return;
       }
-      team1Scores[currentGame] = 0;
-      team2Scores[currentGame] = 0;
-      updatedMatches[widget.matchIndex] = {
-        ..._match,
+      team1Scores.add(0); // Add new set score
+      team2Scores.add(0); // Add new set score
+
+      await FirebaseFirestore.instance
+          .collection('tournaments')
+          .doc(widget.tournamentId)
+          .collection('matches')
+          .doc(_matchId)
+          .update({
         'liveScores': {
           ...currentScores,
           'currentGame': currentGame + 1,
@@ -710,42 +653,30 @@ class _MatchControlPageState extends State<MatchControlPage>
           widget.isDoubles ? 'team2' : 'player2': team2Scores,
           'currentServer': _lastSetWinner,
         },
-      };
-      await FirebaseFirestore.instance
-          .collection('tournaments')
-          .doc(widget.tournamentId)
-          .update({'matches': updatedMatches});
-      setState(() {
-        _match = updatedMatches[widget.matchIndex];
-        _isSetComplete = false;
-        _currentServer = _lastSetWinner;
-        _lastServer = _currentServer;
+        'lastUpdated': FieldValue.serverTimestamp(),
       });
-      if (mounted) {
-        toastification.show(
-          context: context,
-          type: ToastificationType.success,
-          title: Text('Next Set Started', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          description: Text('Set ${currentGame + 1} has begun.', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          autoCloseDuration: const Duration(seconds: 2),
-          backgroundColor: const Color(0xFF2A9D8F),
-          foregroundColor: const Color(0xFFFDFCFB),
-          alignment: Alignment.bottomCenter,
-        );
-      }
+
+      toastification.show(
+        context: context,
+        type: ToastificationType.success,
+        title: Text('Next Set Started', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        description: Text('Set ${currentGame + 1} has begun.', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        autoCloseDuration: const Duration(seconds: 2),
+        backgroundColor: const Color(0xFF2A9D8F),
+        foregroundColor: const Color(0xFFFDFCFB),
+        alignment: Alignment.bottomCenter,
+      );
     } catch (e) {
-      if (mounted) {
-        toastification.show(
-          context: context,
-          type: ToastificationType.error,
-          title: Text('Error', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          description: Text('Failed to start next set: $e', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
-          autoCloseDuration: const Duration(seconds: 2),
-          backgroundColor: const Color(0xFFE76F51),
-          foregroundColor: const Color(0xFFFDFCFB),
-          alignment: Alignment.bottomCenter,
-        );
-      }
+      toastification.show(
+        context: context,
+        type: ToastificationType.error,
+        title: Text('Error', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        description: Text('Failed to start next set: $e', style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB))),
+        autoCloseDuration: const Duration(seconds: 2),
+        backgroundColor: const Color(0xFFE76F51),
+        foregroundColor: const Color(0xFFFDFCFB),
+        alignment: Alignment.bottomCenter,
+      );
     } finally {
       if (mounted) setState(() => _isLoading = false);
     }

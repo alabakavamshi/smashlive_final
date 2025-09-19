@@ -12,6 +12,9 @@
 		3B3967161E833CAA004F5970 /* AppFrameworkInfo.plist in Resources */ = {isa = PBXBuildFile; fileRef = 3B3967151E833CAA004F5970 /* AppFrameworkInfo.plist */; };
 		510C28F7DFF873AC4EA99BDB /* GoogleService-Info.plist in Resources */ = {isa = PBXBuildFile; fileRef = B7E9F661372BB55CC878164E /* GoogleService-Info.plist */; };
 		74858FAF1ED2DC5600515810 /* AppDelegate.swift in Sources */ = {isa = PBXBuildFile; fileRef = 74858FAE1ED2DC5600515810 /* AppDelegate.swift */; };
+		9631A86D2E63557D000F034B /* RecaptchaEnterprise.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9631A86C2E63557D000F034B /* RecaptchaEnterprise.framework */; };
+		9631A86F2E63557D000F034B /* RecaptchaEnterpriseSDK.xcframework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9631A86E2E63557D000F034B /* RecaptchaEnterpriseSDK.xcframework */; };
+		9631A8712E63557D000F034B /* RecaptchaInterop.framework in Frameworks */ = {isa = PBXBuildFile; fileRef = 9631A8702E63557D000F034B /* RecaptchaInterop.framework */; };
 		97C146FC1CF9000F007C117D /* Main.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FA1CF9000F007C117D /* Main.storyboard */; };
 		97C146FE1CF9000F007C117D /* Assets.xcassets in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FD1CF9000F007C117D /* Assets.xcassets */; };
 		97C147011CF9000F007C117D /* LaunchScreen.storyboard in Resources */ = {isa = PBXBuildFile; fileRef = 97C146FF1CF9000F007C117D /* LaunchScreen.storyboard */; };
@@ -54,6 +57,10 @@
 		74858FAD1ED2DC5600515810 /* Runner-Bridging-Header.h */ = {isa = PBXFileReference; lastKnownFileType = sourcecode.c.h; path = "Runner-Bridging-Header.h"; sourceTree = "<group>"; };
 		74858FAE1ED2DC5600515810 /* AppDelegate.swift */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = sourcecode.swift; path = AppDelegate.swift; sourceTree = "<group>"; };
 		7AFA3C8E1D35360C0083082E /* Release.xcconfig */ = {isa = PBXFileReference; lastKnownFileType = text.xcconfig; name = Release.xcconfig; path = Flutter/Release.xcconfig; sourceTree = "<group>"; };
+		9631A86C2E63557D000F034B /* RecaptchaEnterprise.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = RecaptchaEnterprise.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		9631A86E2E63557D000F034B /* RecaptchaEnterpriseSDK.xcframework */ = {isa = PBXFileReference; lastKnownFileType = wrapper.xcframework; name = RecaptchaEnterpriseSDK.xcframework; path = Pods/RecaptchaEnterpriseSDK/Frameworks/RecaptchaEnterpriseSDK.xcframework; sourceTree = "<group>"; };
+		9631A8702E63557D000F034B /* RecaptchaInterop.framework */ = {isa = PBXFileReference; explicitFileType = wrapper.framework; path = RecaptchaInterop.framework; sourceTree = BUILT_PRODUCTS_DIR; };
+		9631A88C2E635647000F034B /* Runner copy-Info.plist */ = {isa = PBXFileReference; lastKnownFileType = text.plist.xml; name = "Runner copy-Info.plist"; path = "/Users/vamshikrishna/Downloads/game_app-main 2/game_app/ios/Runner copy-Info.plist"; sourceTree = "<absolute>"; };
 		96E3BE762E3DFB1A002709A0 /* Runner.entitlements */ = {isa = PBXFileReference; lastKnownFileType = text.plist.entitlements; path = Runner.entitlements; sourceTree = "<group>"; };
 		9740EEB21CF90195004384FC /* Debug.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Debug.xcconfig; path = Flutter/Debug.xcconfig; sourceTree = "<group>"; };
 		9740EEB31CF90195004384FC /* Generated.xcconfig */ = {isa = PBXFileReference; fileEncoding = 4; lastKnownFileType = text.xcconfig; name = Generated.xcconfig; path = Flutter/Generated.xcconfig; sourceTree = "<group>"; };
@@ -70,6 +77,9 @@
 			isa = PBXFrameworksBuildPhase;
 			buildActionMask = 2147483647;
 			files = (
+				9631A86D2E63557D000F034B /* RecaptchaEnterprise.framework in Frameworks */,
+				9631A86F2E63557D000F034B /* RecaptchaEnterpriseSDK.xcframework in Frameworks */,
+				9631A8712E63557D000F034B /* RecaptchaInterop.framework in Frameworks */,
 				CEF21832D1317888868221ED /* Pods_Runner.framework in Frameworks */,
 			);
 			runOnlyForDeploymentPostprocessing = 0;
@@ -88,6 +98,9 @@
 		5713E5DD645D85074B8D98F8 /* Frameworks */ = {
 			isa = PBXGroup;
 			children = (
+				9631A86C2E63557D000F034B /* RecaptchaEnterprise.framework */,
+				9631A86E2E63557D000F034B /* RecaptchaEnterpriseSDK.xcframework */,
+				9631A8702E63557D000F034B /* RecaptchaInterop.framework */,
 				21C21A2B6E01C443893023A6 /* Pods_Runner.framework */,
 			);
 			name = Frameworks;
@@ -114,6 +127,7 @@
 				B7E9F661372BB55CC878164E /* GoogleService-Info.plist */,
 				F1FE3BC59A773E65311CA4C7 /* Pods */,
 				5713E5DD645D85074B8D98F8 /* Frameworks */,
+				9631A88C2E635647000F034B /* Runner copy-Info.plist */,
 			);
 			sourceTree = "<group>";
 		};
@@ -455,7 +469,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_TEAM = 83J55CKMGK;
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
@@ -466,7 +480,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0.0;
+				MARKETING_VERSION = 2.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sandeeptd.smashlive;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -647,7 +661,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_TEAM = 83J55CKMGK;
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
@@ -658,7 +672,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0.0;
+				MARKETING_VERSION = 2.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sandeeptd.smashlive;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";
@@ -680,7 +694,7 @@
 				ASSETCATALOG_COMPILER_INCLUDE_ALL_APPICON_ASSETS = AppIcon;
 				CLANG_ENABLE_MODULES = YES;
 				CODE_SIGN_ENTITLEMENTS = Runner/Runner.entitlements;
-				CURRENT_PROJECT_VERSION = 3;
+				CURRENT_PROJECT_VERSION = 4;
 				DEVELOPMENT_TEAM = 83J55CKMGK;
 				ENABLE_BITCODE = NO;
 				INFOPLIST_FILE = Runner/Info.plist;
@@ -691,7 +705,7 @@
 					"$(inherited)",
 					"@executable_path/Frameworks",
 				);
-				MARKETING_VERSION = 2.0.0;
+				MARKETING_VERSION = 2.0.1;
 				PRODUCT_BUNDLE_IDENTIFIER = com.sandeeptd.smashlive;
 				PRODUCT_NAME = "$(TARGET_NAME)";
 				SUPPORTED_PLATFORMS = "iphoneos iphonesimulator";

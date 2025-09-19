@@ -1,4 +1,5 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:cached_network_image/cached_network_image.dart';
 import 'package:flutter/foundation.dart' show kIsWeb;
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -20,6 +21,8 @@ import 'package:geolocator/geolocator.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:toastification/toastification.dart';
+import 'package:http/http.dart' as http;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 // Extension for string capitalization
 extension StringExtension on String {
@@ -31,11 +34,15 @@ extension StringExtension on String {
 class OrganizerHomePage extends StatefulWidget {
   final bool showLocationDialog;
   final bool returnToPlayPage;
+  final int initialIndex;
+  final String? userCity;
 
   const OrganizerHomePage({
     super.key,
     this.showLocationDialog = false,
     this.returnToPlayPage = false,
+    this.initialIndex = 0,
+    this.userCity,
   });
 
   @override
@@ -55,14 +62,36 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
   ToastificationType? _toastType;
   List<Map<String, dynamic>> _upcomingTournaments = [];
   Map<String, dynamic>? _userData;
-  final TextEditingController _locationController = TextEditingController();
+  final TextEditingController _cityController = TextEditingController();
   AnimationController? _animationController;
   Animation<double>? _scaleAnimation;
   Animation<double>? _fadeAnimation;
 
+  bool _isFetchingLocation = false;
+  bool _isFetchingSuggestions = false;
+  Timer? _debounceTimer;
+  OverlayEntry? _overlayEntry;
+  List<String> _citySuggestions = [];
+  final FocusNode _cityFocusNode = FocusNode();
+  final String _googlePlacesApiKey = dotenv.get('GOOGLE_PLACES_API_KEY');
+
   @override
   void initState() {
     super.initState();
+    _selectedIndex = widget.initialIndex;
+    _shouldReturnToPlayPage = widget.returnToPlayPage;
+    if (widget.userCity != null) {
+      _userCity = widget.userCity!.toLowerCase();
+      // Remove hardcoded India suffix - use actual location data
+      _location = StringExtension(widget.userCity!).capitalize();
+      _locationFetchCompleted = true;
+      _isLoadingLocation = false;
+    } else {
+      _userCity = 'hyderabad';
+      _location = 'Hyderabad, India'; // Keep as fallback only
+      _locationFetchCompleted = true;
+      _isLoadingLocation = false;
+    }
     SystemChrome.setSystemUIOverlayStyle(
       const SystemUiOverlayStyle(
         statusBarColor: Colors.transparent,
@@ -72,24 +101,20 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
     );
 
     _initializeAnimations();
-    _shouldReturnToPlayPage = widget.returnToPlayPage;
     _initializeUserData();
 
     WidgetsBinding.instance.addPostFrameCallback((_) async {
-      if (!kIsWeb) {
+      if (!kIsWeb && widget.userCity == null) {
         await _getUserLocation();
-      } else {
-        if (mounted) {
-          setState(() {
-            _location = 'Hyderabad, India';
-            _userCity = 'hyderabad';
-            _locationFetchCompleted = true;
-            _isLoadingLocation = false;
-          });
-        }
-        if (widget.showLocationDialog) {
-          _showLocationSearchDialog();
-        }
+      }
+      if (widget.showLocationDialog && mounted) {
+        _showLocationSearchDialog();
+      }
+    });
+
+    _cityFocusNode.addListener(() {
+      if (!_cityFocusNode.hasFocus) {
+        _removeOverlay();
       }
     });
   }
@@ -153,57 +178,250 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
         .map((snapshot) => snapshot.data());
   }
 
-  Stream<List<Map<String, dynamic>>> _upcomingTournamentsStream() {
-    final authState = context.read<AuthBloc>().state;
-    if (authState is! AuthAuthenticated) {
-      return Stream.value([]);
-    }
-
-    return FirebaseFirestore.instance
-        .collection('tournaments')
-        .where('createdBy', isEqualTo: authState.user.uid)
-        .where('endDate', isGreaterThanOrEqualTo: Timestamp.now())
-        .orderBy('startDate', descending: false)
-        .limit(5)
-        .snapshots()
-        .map((querySnapshot) {
-      return querySnapshot.docs.map((doc) {
-        final data = doc.data();
-        final startTimeData = data['startTime'] as Map<String, dynamic>? ?? {'hour': 0, 'minute': 0};
-        return {
-          'id': doc.id,
-          'name': data['name']?.toString() ?? 'Unnamed Tournament',
-          'startDate': data['startDate'] ?? Timestamp.now(),
-          'endDate': data['endDate'] ?? Timestamp.now(),
-          'startTime': TimeOfDay(
-            hour: startTimeData['hour'] as int? ?? 0,
-            minute: startTimeData['minute'] as int? ?? 0,
-          ),
-          'location': (data['venue']?.toString().isNotEmpty == true &&
-                  data['city']?.toString().isNotEmpty == true)
-              ? '${data['venue']}, ${data['city']}'
-              : 'Unknown',
-          'status': data['status']?.toString() ?? 'open',
-          'participantCount': (data['participants'] as List?)?.length ?? 0,
-          'entryFee': (data['entryFee'] as num?)?.toDouble() ?? 0.0,
-          'maxParticipants': data['maxParticipants']?.toInt() ?? 0,
-          'createdBy': data['createdBy']?.toString() ?? '',
-        };
-      }).toList();
-    });
+Stream<List<Map<String, dynamic>>> _upcomingTournamentsStream() {
+  final authState = context.read<AuthBloc>().state;
+  if (authState is! AuthAuthenticated) {
+    return Stream.value([]);
   }
+
+  return FirebaseFirestore.instance
+      .collection('tournaments')
+      .where('createdBy', isEqualTo: authState.user.uid)
+      .where('endDate', isGreaterThanOrEqualTo: Timestamp.now())
+      .orderBy('startDate', descending: false)
+      .limit(5)
+      .snapshots()
+      .map((querySnapshot) {
+    return querySnapshot.docs.map((doc) {
+      final data = doc.data();
+      final startTimeData = data['startTime'] as Map<String, dynamic>? ?? {'hour': 0, 'minute': 0};
+      final eventCity = data['city']?.toString().toLowerCase().split(',')[0].trim() ?? '';
+      return {
+        'id': doc.id,
+        'name': data['name']?.toString() ?? 'Unnamed Tournament',
+        'startDate': data['startDate'] ?? Timestamp.now(),
+        'endDate': data['endDate'] ?? Timestamp.now(),
+        'startTime': TimeOfDay(
+          hour: startTimeData['hour'] as int? ?? 0,
+          minute: startTimeData['minute'] as int? ?? 0,
+        ),
+        'location': (data['venue']?.toString().isNotEmpty == true &&
+                data['city']?.toString().isNotEmpty == true)
+            ? '${data['venue']}, ${data['city']}'
+            : 'Unknown',
+        'city': eventCity, // Normalized city for filtering
+        'status': data['status']?.toString() ?? 'open',
+        'participantCount': (data['participants'] as List?)?.length ?? 0,
+        'entryFee': (data['entryFee'] as num?)?.toDouble() ?? 0.0,
+        'maxParticipants': data['maxParticipants']?.toInt() ?? 0,
+        'createdBy': data['createdBy']?.toString() ?? '',
+      };
+    }).toList();
+  });
+}
+
 
   @override
   void dispose() {
-    _locationController.dispose();
+    _debounceTimer?.cancel();
+    _cityController.dispose();
+    _cityFocusNode.dispose();
+    _removeOverlay();
     _animationController?.dispose();
     super.dispose();
+  }
+
+  void _removeOverlay() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+  }
+
+  Future<void> _fetchCitySuggestions(String query) async {
+    if (query.isEmpty || query.length < 2) {
+      setState(() {
+        _isFetchingSuggestions = false;
+        _citySuggestions = [];
+      });
+      _removeOverlay();
+      return;
+    }
+
+    setState(() {
+      _isFetchingSuggestions = true;
+    });
+
+    try {
+      final url = Uri.parse(
+        'https://maps.googleapis.com/maps/api/place/autocomplete/json?input=$query&types=(cities)&key=$_googlePlacesApiKey',
+      );
+
+      final response = await http.get(url);
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final predictions = data['predictions'] as List<dynamic>?;
+
+        if (predictions != null && predictions.isNotEmpty) {
+          final suggestions = predictions
+              .map<String>((prediction) => prediction['description'] as String)
+              .where((city) => city.isNotEmpty)
+              .toList();
+
+          setState(() {
+            _citySuggestions = suggestions;
+            _isFetchingSuggestions = false;
+          });
+
+          if (_citySuggestions.isNotEmpty && context.mounted) {
+            final renderBox = _cityFocusNode.context?.findRenderObject() as RenderBox?;
+            if (renderBox != null) {
+              _showSuggestionsOverlay(_citySuggestions, context, renderBox);
+            }
+          } else {
+            _removeOverlay();
+          }
+        } else {
+          setState(() {
+            _citySuggestions = [];
+            _isFetchingSuggestions = false;
+          });
+          _removeOverlay();
+        }
+      } else {
+        setState(() {
+          _isFetchingSuggestions = false;
+        });
+        _removeOverlay();
+        _fetchCitySuggestionsFallback(query);
+      }
+    } catch (e) {
+      setState(() {
+        _isFetchingSuggestions = false;
+      });
+      _removeOverlay();
+      _fetchCitySuggestionsFallback(query);
+    }
+  }
+
+  Future<void> _fetchCitySuggestionsFallback(String query) async {
+    try {
+      final locations = await locationFromAddress(query).timeout(const Duration(seconds: 5));
+      final placemarks = await Future.wait(
+        locations.take(5).map((loc) => placemarkFromCoordinates(loc.latitude, loc.longitude)),
+      );
+
+      final suggestions = placemarks
+          .expand((placemarkList) => placemarkList)
+          .map((placemark) {
+            final city = placemark.locality ?? '';
+            final state = placemark.administrativeArea ?? '';
+            final country = placemark.country ?? '';
+            
+            // Build location string with available components
+            List<String> parts = [];
+            if (city.isNotEmpty) parts.add(city);
+            if (state.isNotEmpty) parts.add(state);
+            if (country.isNotEmpty) parts.add(country);
+            
+            return parts.join(', ');
+          })
+          .where((city) => city.isNotEmpty)
+          .toSet()
+          .toList();
+
+      setState(() {
+        _citySuggestions = suggestions;
+        _isFetchingSuggestions = false;
+      });
+
+      if (_citySuggestions.isNotEmpty && context.mounted) {
+        final renderBox = _cityFocusNode.context?.findRenderObject() as RenderBox?;
+        if (renderBox != null) {
+          _showSuggestionsOverlay(_citySuggestions, context, renderBox);
+        }
+      } else {
+        _removeOverlay();
+      }
+    } catch (e) {
+      setState(() {
+        _isFetchingSuggestions = false;
+      });
+      _removeOverlay();
+    }
+  }
+
+  void _showSuggestionsOverlay(List<String> suggestions, BuildContext context, RenderBox renderBox) {
+    _removeOverlay();
+    
+    final width = renderBox.size.width;
+    final offset = renderBox.localToGlobal(Offset.zero);
+    
+    _overlayEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        left: offset.dx,
+        top: offset.dy + renderBox.size.height + 4,
+        width: width,
+        child: Material(
+          elevation: 4,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            constraints: const BoxConstraints(maxHeight: 200),
+            decoration: BoxDecoration(
+              color: Colors.white,
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.1),
+                  blurRadius: 8,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: ListView.builder(
+              shrinkWrap: true,
+              padding: EdgeInsets.zero,
+              itemCount: suggestions.length,
+              itemBuilder: (context, index) {
+                final city = suggestions[index];
+                return ListTile(
+                  title: Text(
+                    city,
+                    style: GoogleFonts.poppins(
+                      color: Colors.black87,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  onTap: () {
+                    setState(() {
+                      _cityController.text = city;
+                      _location = city; // Use the selected location as-is
+                      _userCity = city.split(',')[0].trim().toLowerCase();
+                    });
+                    _removeOverlay();
+                  },
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+    
+    Overlay.of(context).insert(_overlayEntry!);
+  }
+
+  void _debounceCityValidation(String value) {
+    _debounceTimer?.cancel();
+    _debounceTimer = Timer(const Duration(milliseconds: 500), () {
+      _fetchCitySuggestions(value);
+    });
   }
 
   Future<void> _getUserLocation() async {
     if (kIsWeb || !mounted) return;
 
     setState(() {
+      _isFetchingLocation = true;
       _isLoadingLocation = true;
       _locationFetchCompleted = false;
     });
@@ -213,7 +431,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
       if (!serviceEnabled) {
         if (mounted) {
           setState(() {
-            _location = 'Hyderabad, India';
+            _location = 'Hyderabad, India'; // Keep as fallback only
             _userCity = 'hyderabad';
             _showToast = true;
             _toastMessage = 'Location services disabled';
@@ -229,7 +447,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
         if (permission == LocationPermission.denied) {
           if (mounted) {
             setState(() {
-              _location = 'Hyderabad, India';
+              _location = 'Hyderabad, India'; // Keep as fallback only
               _userCity = 'hyderabad';
               _showToast = true;
               _toastMessage = 'Location permission denied';
@@ -243,7 +461,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
       if (permission == LocationPermission.deniedForever) {
         if (mounted) {
           setState(() {
-            _location = 'Hyderabad, India';
+            _location = 'Hyderabad, India'; // Keep as fallback only
             _userCity = 'hyderabad';
             _showToast = true;
             _toastMessage = 'Location permission denied forever';
@@ -265,17 +483,25 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
         final placemark = placemarks.first;
         final city = placemark.locality ?? placemark.subAdministrativeArea ?? placemark.administrativeArea ?? '';
         final country = placemark.country ?? '';
+        
         setState(() {
-          _location = country.isNotEmpty ? '$city, $country' : city;
-          _userCity = city.isNotEmpty ? city.toLowerCase() : 'hyderabad';
-          _showToast = true;
-          _toastMessage = city.isNotEmpty ? 'Location updated to $_location' : 'Unable to determine city';
-          _toastType = city.isNotEmpty ? ToastificationType.success : ToastificationType.warning;
+          if (city.isNotEmpty) {
+            _location = country.isNotEmpty ? '$city, $country' : city;
+            _userCity = city.toLowerCase();
+            _showToast = true;
+            _toastType = ToastificationType.success;
+          } else {
+            _location = 'Hyderabad, India'; // Fallback
+            _userCity = 'hyderabad';
+            _showToast = true;
+            _toastMessage = 'Unable to determine location';
+            _toastType = ToastificationType.warning;
+          }
         });
       } else {
         if (mounted) {
           setState(() {
-            _location = 'Hyderabad, India';
+            _location = 'Hyderabad, India'; // Fallback
             _userCity = 'hyderabad';
             _showToast = true;
             _toastMessage = 'Unable to determine location';
@@ -287,7 +513,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
       debugPrint('Location error: $e');
       if (mounted) {
         setState(() {
-          _location = 'Hyderabad, India';
+          _location = 'Hyderabad, India'; // Fallback
           _userCity = 'hyderabad';
           _showToast = true;
           _toastMessage = 'Failed to fetch location';
@@ -297,6 +523,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
     } finally {
       if (mounted) {
         setState(() {
+          _isFetchingLocation = false;
           _isLoadingLocation = false;
           _locationFetchCompleted = true;
         });
@@ -325,20 +552,19 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
           final placemark = placemarks.first;
           final city = placemark.locality ?? placemark.subAdministrativeArea ?? placemark.administrativeArea ?? query;
           final country = placemark.country ?? '';
+          
           setState(() {
             _location = country.isNotEmpty ? '$city, $country' : city;
             _userCity = city.toLowerCase();
             _showToast = true;
-            _toastMessage = 'Location set to $_location';
             _toastType = ToastificationType.success;
           });
         } else {
           if (mounted) {
             setState(() {
-              _location = query;
+              _location = query; // Use query as-is if no placemarks
               _userCity = query.toLowerCase();
               _showToast = true;
-              _toastMessage = 'Location set to $_location';
               _toastType = ToastificationType.success;
             });
           }
@@ -346,10 +572,9 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
       } else {
         if (mounted) {
           setState(() {
-            _location = query;
+            _location = query; // Use query as-is if no locations found
             _userCity = query.toLowerCase();
             _showToast = true;
-            _toastMessage = 'Location set to $_location';
             _toastType = ToastificationType.success;
           });
         }
@@ -358,10 +583,9 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
       debugPrint('Search location error: $e');
       if (mounted) {
         setState(() {
-          _location = query;
+          _location = query; // Use query as-is on error
           _userCity = query.toLowerCase();
           _showToast = true;
-          _toastMessage = 'Location set to $_location';
           _toastType = ToastificationType.success;
         });
       }
@@ -369,7 +593,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
   }
 
   void _showLocationSearchDialog() {
-    _locationController.clear();
+    _cityController.clear();
     _animationController?.forward();
 
     showDialog(
@@ -445,7 +669,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
                               style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB), fontSize: 16), // Background
                             ),
                             const Spacer(),
-                            if (_isLoadingLocation)
+                            if (_isFetchingLocation)
                               const SizedBox(
                                 width: 20,
                                 height: 20,
@@ -469,7 +693,9 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
                     ),
                     const SizedBox(height: 12),
                     TextField(
-                      controller: _locationController,
+                      controller: _cityController,
+                      focusNode: _cityFocusNode,
+                      onChanged: _debounceCityValidation,
                       style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB)), // Background
                       keyboardType: TextInputType.text,
                       decoration: InputDecoration(
@@ -481,6 +707,16 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
                           borderRadius: BorderRadius.circular(12),
                         ),
                         prefixIcon: const Icon(Icons.search, color: Color(0xFFA8DADC)), // Cool Blue Highlights
+                        suffixIcon: _isFetchingSuggestions
+                            ? const SizedBox(
+                                width: 20,
+                                height: 20,
+                                child: CircularProgressIndicator(
+                                  strokeWidth: 2,
+                                  valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFF4A261)),
+                                ),
+                              )
+                            : null,
                         contentPadding: const EdgeInsets.symmetric(vertical: 12),
                       ),
                     ),
@@ -499,7 +735,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
                               }
                             },
                             style: TextButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                               backgroundColor: const Color(0xFFC1DADB).withOpacity(0.1), // Secondary
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                             ),
@@ -513,13 +749,13 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
                         Expanded(
                           child: ElevatedButton(
                             onPressed: () {
-                              if (_locationController.text.isNotEmpty) {
-                                _searchLocation(_locationController.text);
+                              if (_cityController.text.isNotEmpty) {
+                                _searchLocation(_cityController.text);
                                 Navigator.pop(context);
                               }
                             },
                             style: ElevatedButton.styleFrom(
-                              padding: const EdgeInsets.symmetric(vertical: 14),
+                              padding: const EdgeInsets.symmetric(horizontal: 14, vertical: 10),
                               backgroundColor: const Color(0xFF6C9A8B), // Primary
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                             ),
@@ -538,7 +774,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
           ),
         );
       },
-    );
+    ).then((_) => _removeOverlay());
   }
 
   Widget _buildWelcomeCard() {
@@ -546,21 +782,21 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
       stream: _userDataStream(),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting && _userData == null) {
-          return const Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFF4A261)))); // Accent
+          return const Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFF4A261))));
         }
 
         if (snapshot.hasError) {
           return Center(
             child: Text(
               'Error loading user data',
-              style: GoogleFonts.poppins(color: const Color(0xFFE76F51)), // Error
+              style: GoogleFonts.poppins(color: const Color(0xFFE76F51)),
             ),
           );
         }
 
         _userData = snapshot.data ?? _userData;
         if (_userData == null) {
-          return const Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFF4A261)))); // Accent
+          return const Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFF4A261))));
         }
 
         final displayName = _userData!['firstName']?.toString().isNotEmpty == true
@@ -579,7 +815,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
             borderRadius: BorderRadius.circular(20),
             boxShadow: [
               BoxShadow(
-                color: const Color(0xFF333333).withOpacity(0.2), // Text Primary
+                color: const Color(0xFF333333).withOpacity(0.2),
                 blurRadius: 15,
                 offset: const Offset(0, 6),
               ),
@@ -668,14 +904,14 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
       stream: _upcomingTournamentsStream(),
       builder: (context, snapshot) {
         if (snapshot.connectionState == ConnectionState.waiting) {
-          return const Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFF4A261)))); // Accent
+          return const Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFF4A261))));
         }
 
         if (snapshot.hasError) {
           return Center(
             child: Text(
               'Error loading tournaments',
-              style: GoogleFonts.poppins(color: const Color(0xFFE76F51)), // Error
+              style: GoogleFonts.poppins(color: const Color(0xFFE76F51)),
             ),
           );
         }
@@ -768,7 +1004,6 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
               else
                 ..._upcomingTournaments.map((tournament) {
                   final startDate = (tournament['startDate'] as Timestamp).toDate();
-                  (tournament['endDate'] as Timestamp).toDate();
                   return Container(
                     margin: const EdgeInsets.only(bottom: 16),
                     padding: const EdgeInsets.all(16),
@@ -900,15 +1135,15 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
   Color _getTournamentStatusColor(String status) {
     switch (status.toLowerCase()) {
       case 'open':
-        return const Color(0xFFF4A261); // Accent
+        return const Color(0xFFF4A261);
       case 'ongoing':
-        return const Color(0xFF2A9D8F); // Success
+        return const Color(0xFF2A9D8F);
       case 'completed':
-        return const Color(0xFFE9C46A); // Mood Booster
+        return const Color(0xFFE9C46A);
       case 'cancelled':
-        return const Color(0xFFE76F51); // Error
+        return const Color(0xFFE76F51);
       default:
-        return const Color(0xFF757575); // Text Secondary
+        return const Color(0xFF757575);
     }
   }
 
@@ -1038,9 +1273,9 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
         child: Container(
           padding: const EdgeInsets.all(24),
           decoration: BoxDecoration(
-            color: const Color(0xFF1D3557), // Deep Indigo
+            color: const Color(0xFF1D3557),
             borderRadius: BorderRadius.circular(20),
-            border: Border.all(color: const Color(0xFFA8DADC).withOpacity(0.7)), // Cool Blue Highlights
+            border: Border.all(color: const Color(0xFFA8DADC).withOpacity(0.7)),
           ),
           child: Column(
             mainAxisSize: MainAxisSize.min,
@@ -1048,7 +1283,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
               Text(
                 'Confirm Logout',
                 style: GoogleFonts.poppins(
-                  color: const Color(0xFFFDFCFB), // Background
+                  color: const Color(0xFFFDFCFB),
                   fontWeight: FontWeight.bold,
                   fontSize: 18,
                 ),
@@ -1057,7 +1292,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
               Text(
                 'Are you sure you want to logout?',
                 style: GoogleFonts.poppins(
-                  color: const Color(0xFFA8DADC), // Cool Blue Highlights
+                  color: const Color(0xFFA8DADC),
                   fontSize: 14,
                 ),
               ),
@@ -1069,12 +1304,12 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
                     onPressed: () => Navigator.pop(context, false),
                     style: TextButton.styleFrom(
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                      backgroundColor: const Color(0xFFC1DADB).withOpacity(0.1), // Secondary
+                      backgroundColor: const Color(0xFFC1DADB).withOpacity(0.1),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     ),
                     child: Text(
                       'Cancel',
-                      style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB), fontWeight: FontWeight.w500), // Background
+                      style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB), fontWeight: FontWeight.w500),
                     ),
                   ),
                   const SizedBox(width: 12),
@@ -1082,12 +1317,12 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
                     onPressed: () => Navigator.pop(context, true),
                     style: ElevatedButton.styleFrom(
                       padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 10),
-                      backgroundColor: const Color(0xFFE76F51), // Error
+                      backgroundColor: const Color(0xFFE76F51),
                       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                     ),
                     child: Text(
                       'Logout',
-                      style: GoogleFonts.poppins(fontWeight: FontWeight.w500, color: const Color(0xFFFDFCFB)), // Background
+                      style: GoogleFonts.poppins(fontWeight: FontWeight.w500, color: const Color(0xFFFDFCFB)),
                     ),
                   ),
                 ],
@@ -1193,13 +1428,7 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
                 ? CreateTournamentPage(
                     userId: state.user.uid,
                     onBackPressed: () => setState(() => _selectedIndex = 0),
-                    onTournamentCreated: () {
-                      if (mounted) {
-                        setState(() {
-                          _selectedIndex = 2;
-                        });
-                      }
-                    },
+                    onTournamentCreated: () => setState(() => _selectedIndex = 2),
                   )
                 : const Center(child: CircularProgressIndicator(valueColor: AlwaysStoppedAnimation<Color>(Color(0xFFF4A261)))),
             PlayPage(userCity: _userCity, key: ValueKey(_userCity)),
@@ -1322,15 +1551,13 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
                         icon: Container(
                           padding: const EdgeInsets.all(8),
                           decoration: BoxDecoration(
-                            color: _selectedIndex == 0 
+                            color: _selectedIndex == 0
                                 ? const Color(0xFF6C9A8B).withOpacity(0.15)
                                 : Colors.transparent,
                             shape: BoxShape.circle,
                           ),
                           child: Icon(
-                            _selectedIndex == 0 
-                                ? Icons.home_filled 
-                                : Icons.home_outlined,
+                            _selectedIndex == 0 ? Icons.home_filled : Icons.home_outlined,
                             size: 24,
                           ),
                         ),
@@ -1340,15 +1567,13 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
                         icon: Container(
                           padding: const EdgeInsets.all(8),
                           decoration: BoxDecoration(
-                            color: _selectedIndex == 1 
+                            color: _selectedIndex == 1
                                 ? const Color(0xFF6C9A8B).withOpacity(0.15)
                                 : Colors.transparent,
                             shape: BoxShape.circle,
                           ),
                           child: Icon(
-                            _selectedIndex == 1 
-                                ? Icons.add_circle 
-                                : Icons.add_circle_outline,
+                            _selectedIndex == 1 ? Icons.add_circle : Icons.add_circle_outline,
                             size: 24,
                           ),
                         ),
@@ -1358,15 +1583,13 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
                         icon: Container(
                           padding: const EdgeInsets.all(8),
                           decoration: BoxDecoration(
-                            color: _selectedIndex == 2 
+                            color: _selectedIndex == 2
                                 ? const Color(0xFF6C9A8B).withOpacity(0.15)
                                 : Colors.transparent,
                             shape: BoxShape.circle,
                           ),
                           child: Icon(
-                            _selectedIndex == 2 
-                                ? Icons.sports_tennis 
-                                : Icons.sports_tennis_outlined,
+                            _selectedIndex == 2 ? Icons.sports_tennis : Icons.sports_tennis_outlined,
                             size: 24,
                           ),
                         ),
@@ -1376,15 +1599,13 @@ class _OrganizerHomePageState extends State<OrganizerHomePage> with SingleTicker
                         icon: Container(
                           padding: const EdgeInsets.all(8),
                           decoration: BoxDecoration(
-                            color: _selectedIndex == 3 
+                            color: _selectedIndex == 3
                                 ? const Color(0xFF6C9A8B).withOpacity(0.15)
                                 : Colors.transparent,
                             shape: BoxShape.circle,
                           ),
                           child: Icon(
-                            _selectedIndex == 3 
-                                ? Icons.person 
-                                : Icons.person_outline,
+                            _selectedIndex == 3 ? Icons.person : Icons.person_outline,
                             size: 24,
                           ),
                         ),

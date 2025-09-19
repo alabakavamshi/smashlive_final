@@ -12,6 +12,7 @@ import 'package:shimmer/shimmer.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
 import 'package:game_app/blocs/auth/auth_bloc.dart';
 import 'package:game_app/blocs/auth/auth_state.dart';
+import 'package:timezone/timezone.dart' as tz;
 
 enum DisplayMode { list, grid, compact }
 
@@ -31,24 +32,22 @@ class _PlayPageState extends State<PlayPage> {
   bool _isCityValid = false;
   bool _isCheckingCity = true;
   bool _isRefreshing = false;
-  String? _selectedGameFormat;
+  String? _selectedGameType;
   DateTime? _filterStartDate;
   DateTime? _filterEndDate;
   String _sortBy = 'date';
   bool _isSearchExpanded = false;
   DisplayMode _displayMode = DisplayMode.list;
 
-  final List<String> _validCities = [
-    'hyderabad',
-    'mumbai',
-    'delhi',
-    'bengaluru',
-    'chennai',
-    'kolkata',
-    'pune',
-    'ahmedabad',
-    'jaipur',
-    'lucknow',
+  final List<String> _gameTypes = [
+    'All',
+     'Knockout',
+              'Round-Robin',
+              'Double Elimination',
+              'Group + Knockout',
+              'Team Format',
+              'Ladder',
+              'Swiss Format',
   ];
 
   @override
@@ -68,6 +67,50 @@ class _PlayPageState extends State<PlayPage> {
     super.dispose();
   }
 
+  String _normalizeCity(String city) {
+    // Normalize city by taking the primary city name (before first comma) and converting to lowercase
+    return city.split(',')[0].trim().toLowerCase();
+  }
+
+  Future<bool> _validateCity(String city) async {
+    final trimmedCity = _normalizeCity(city);
+    if (trimmedCity.isEmpty || trimmedCity == 'unknown') {
+      print('City validation failed: city is empty or unknown ($trimmedCity)');
+      return false;
+    }
+
+    try {
+      List<Location> locations = await locationFromAddress(city).timeout(const Duration(seconds: 5));
+      if (locations.isEmpty) {
+        print('City validation failed: no locations found for $city');
+        return false;
+      }
+
+      List<Placemark> placemarks = await placemarkFromCoordinates(
+        locations.first.latitude,
+        locations.first.longitude,
+      ).timeout(const Duration(seconds: 5));
+
+      if (placemarks.isEmpty) {
+        print('City validation failed: no placemarks found for $city');
+        return false;
+      }
+
+      final locality = placemarks[0].locality?.toLowerCase() ?? '';
+      final subLocality = placemarks[0].subLocality?.toLowerCase() ?? '';
+      final administrativeArea = placemarks[0].administrativeArea?.toLowerCase() ?? '';
+      final isValid = locality.contains(trimmedCity) || 
+                      subLocality.contains(trimmedCity) || 
+                      administrativeArea.contains(trimmedCity);
+      print('City validation for "$city": locality=$locality, subLocality=$subLocality, administrativeArea=$administrativeArea, isValid=$isValid');
+      return isValid;
+    } catch (e) {
+      print('City validation error for "$city": $e');
+      // Fallback to allowing non-empty city to avoid blocking valid cities
+      return trimmedCity.isNotEmpty;
+    }
+  }
+
   Future<void> _validateUserCity() async {
     setState(() => _isCheckingCity = true);
     final isValid = await _validateCity(widget.userCity);
@@ -75,7 +118,7 @@ class _PlayPageState extends State<PlayPage> {
       _isCityValid = isValid;
       _isCheckingCity = false;
     });
-    print('User city validation result: $_isCityValid');
+    print('User city validation result for "${widget.userCity}": $_isCityValid');
     if (!isValid && widget.userCity.isNotEmpty && widget.userCity.toLowerCase() != 'unknown') {
       toastification.show(
         context: context,
@@ -87,29 +130,6 @@ class _PlayPageState extends State<PlayPage> {
         foregroundColor: Colors.black,
         alignment: Alignment.bottomCenter,
       );
-    }
-  }
-
-  Future<bool> _validateCity(String city) async {
-    final trimmedCity = city.trim().toLowerCase();
-    if (trimmedCity.isEmpty || trimmedCity == 'unknown') return false;
-    if (trimmedCity.length < 5) return false;
-    if (_validCities.contains(trimmedCity)) return true;
-
-    try {
-      List<Location> locations = await locationFromAddress(city).timeout(const Duration(seconds: 5));
-      if (locations.isEmpty) return false;
-
-      List<Placemark> placemarks = await placemarkFromCoordinates(
-        locations.first.latitude,
-        locations.first.longitude,
-      ).timeout(const Duration(seconds: 5));
-
-      if (placemarks.isEmpty) return false;
-      return placemarks[0].locality?.toLowerCase() == trimmedCity;
-    } catch (e) {
-      print('City validation error: $e');
-      return false;
     }
   }
 
@@ -169,7 +189,7 @@ class _PlayPageState extends State<PlayPage> {
 
   void _showFilterDialog() {
     final formKey = GlobalKey<FormState>();
-    String? tempGameFormat = _selectedGameFormat;
+    String? tempGameType = _selectedGameType;
     DateTime? tempStartDate = _filterStartDate;
     DateTime? tempEndDate = _filterEndDate;
 
@@ -211,7 +231,7 @@ class _PlayPageState extends State<PlayPage> {
                       ),
                       const SizedBox(height: 16),
                       Text(
-                        'Match Type',
+                        'Game Type',
                         style: GoogleFonts.poppins(
                           color: Colors.grey[700],
                           fontSize: 14,
@@ -221,30 +241,23 @@ class _PlayPageState extends State<PlayPage> {
                       const SizedBox(height: 8),
                       Wrap(
                         spacing: 8,
-                        children: [
-                          'All',
-                          'Men\'s Singles',
-                          'Women\'s Singles',
-                          'Men\'s Doubles',
-                          'Women\'s Doubles',
-                          'Mixed Doubles'
-                        ]
-                            .map((format) => ChoiceChip(
+                        children: _gameTypes
+                            .map((type) => ChoiceChip(
                                   label: Text(
-                                    format,
+                                    type,
                                     style: GoogleFonts.poppins(
-                                      color: tempGameFormat == (format == 'All' ? null : format)
+                                      color: tempGameType == (type == 'All' ? null : type)
                                           ? Colors.black
                                           : Colors.grey[700],
                                       fontSize: 12,
                                       fontWeight: FontWeight.w400,
                                     ),
                                   ),
-                                  selected: tempGameFormat == (format == 'All' ? null : format),
+                                  selected: tempGameType == (type == 'All' ? null : type),
                                   onSelected: (selected) {
                                     if (selected) {
                                       setDialogState(() {
-                                        tempGameFormat = format == 'All' ? null : format;
+                                        tempGameType = type == 'All' ? null : type;
                                       });
                                     }
                                   },
@@ -372,7 +385,7 @@ class _PlayPageState extends State<PlayPage> {
                             child: TextButton(
                               onPressed: () {
                                 setDialogState(() {
-                                  tempGameFormat = null;
+                                  tempGameType = null;
                                   tempStartDate = null;
                                   tempEndDate = null;
                                 });
@@ -399,7 +412,7 @@ class _PlayPageState extends State<PlayPage> {
                             child: ElevatedButton(
                               onPressed: () {
                                 setState(() {
-                                  _selectedGameFormat = tempGameFormat;
+                                  _selectedGameType = tempGameType;
                                   _filterStartDate = tempStartDate;
                                   _filterEndDate = tempEndDate;
                                 });
@@ -650,7 +663,7 @@ class _PlayPageState extends State<PlayPage> {
                   OutlinedButton(
                     onPressed: () {
                       setState(() {
-                        _selectedGameFormat = null;
+                        _selectedGameType = null;
                         _filterStartDate = null;
                         _filterEndDate = null;
                         _searchQuery = '';
@@ -759,6 +772,8 @@ class _PlayPageState extends State<PlayPage> {
     required String? userId,
   }) {
     final creatorName = creatorNames[tournament.createdBy] ?? 'Unknown User';
+    final totalParticipants = tournament.events.fold(0, (su, event) => su + event.participants.length);
+    
     return Card(
       margin: const EdgeInsets.all(8),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -779,23 +794,26 @@ class _PlayPageState extends State<PlayPage> {
             Expanded(
               child: ClipRRect(
                 borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-                child: SizedBox(
-                  width: double.infinity,
-                  height: double.infinity,
-                  child: Image.asset(
-                    tournament.profileImage ?? "assets/tournament_placholder.jpg",
-                    fit: BoxFit.cover,
-                    width: double.infinity,
-                    height: double.infinity,
-                    errorBuilder: (context, error, stackTrace) {
-                      print('Image load error for ${tournament.profileImage}: $error');
-                      return Container(
-                        color: Colors.grey[200],
-                        child: const Icon(Icons.broken_image, color: Colors.grey),
-                      );
-                    },
-                  ),
-                ),
+                child: tournament.profileImage != null && tournament.profileImage!.isNotEmpty
+                    ? Image.network(
+                        tournament.profileImage!,
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                        height: double.infinity,
+                        errorBuilder: (context, error, stackTrace) {
+                          print('Image load error for ${tournament.profileImage}: $error');
+                          return Container(
+                            color: Colors.grey[200],
+                            child: const Icon(Icons.broken_image, color: Colors.grey),
+                          );
+                        },
+                      )
+                    : Image.asset(
+                        'assets/tournament_placholder.jpg',
+                        fit: BoxFit.cover,
+                        width: double.infinity,
+                        height: double.infinity,
+                      ),
               ),
             ),
             Padding(
@@ -815,11 +833,32 @@ class _PlayPageState extends State<PlayPage> {
                   ),
                   const SizedBox(height: 4),
                   Text(
-                    '${DateFormat('MMM d').format(tournament.startDate)} • ${tournament.city}',
+                    '${tournament.gameType} • ${DateFormat('MMM d').format(tz.TZDateTime.from(tournament.startDate, tz.getLocation(tournament.timezone)))} • ${tournament.city}',
                     style: GoogleFonts.poppins(
                       color: const Color.fromARGB(255, 68, 67, 67),
                       fontSize: 12,
+                      
                     ),
+                    maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                  ),
+                  const SizedBox(height: 4),
+                  Row(
+                    children: [
+                      Icon(Icons.people, size: 12, color: Colors.grey[600]),
+                      const SizedBox(width: 4),
+                      Expanded(
+                        child: Text(
+                          '$totalParticipants Participant${totalParticipants != 1 ? 's' : ''}',
+                          style: GoogleFonts.poppins(
+                            color: Colors.grey[600],
+                            fontSize: 11,
+                          
+                          ),
+                           overflow : TextOverflow.ellipsis,
+                        ),
+                      ),
+                    ],
                   ),
                 ],
               ),
@@ -837,6 +876,8 @@ class _PlayPageState extends State<PlayPage> {
     required String? userId,
   }) {
     final creatorName = creatorNames[tournament.createdBy] ?? 'Unknown User';
+    final totalParticipants = tournament.events.fold(0, (su, event) => su + event.participants.length);
+    
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -847,28 +888,54 @@ class _PlayPageState extends State<PlayPage> {
           height: 50,
           child: ClipRRect(
             borderRadius: BorderRadius.circular(8),
-            child: Image.asset(
-              tournament.profileImage ?? "assets/tournament_placholder.jpg",
-              fit: BoxFit.cover,
-              width: 50,
-              height: 50,
-              errorBuilder: (context, error, stackTrace) {
-                print('Image load error for ${tournament.profileImage}: $error');
-                return Container(
-                  color: Colors.grey[200],
-                  child: const Icon(Icons.broken_image, color: Colors.grey),
-                );
-              },
-            ),
+            child: tournament.profileImage != null && tournament.profileImage!.isNotEmpty
+                ? Image.network(
+                    tournament.profileImage!,
+                    fit: BoxFit.cover,
+                    width: 50,
+                    height: 50,
+                    errorBuilder: (context, error, stackTrace) {
+                      print('Image load error for ${tournament.profileImage}: $error');
+                      return Container(
+                        color: Colors.grey[200],
+                        child: const Icon(Icons.broken_image, color: Colors.grey),
+                      );
+                    },
+                  )
+                : Image.asset(
+                    'assets/tournament_placholder.jpg',
+                    fit: BoxFit.cover,
+                    width: 50,
+                    height: 50,
+                  ),
           ),
         ),
         title: Text(
           tournament.name,
           style: GoogleFonts.poppins(fontWeight: FontWeight.w500),
+          maxLines: 1,
+          overflow: TextOverflow.ellipsis,
         ),
-        subtitle: Text(
-          '${DateFormat('MMM d').format(tournament.startDate)} • ${tournament.city}',
-          style: GoogleFonts.poppins(fontSize: 12),
+        subtitle: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Text(
+              '${tournament.gameType} • ${DateFormat('MMM d').format(tz.TZDateTime.from(tournament.startDate, tz.getLocation(tournament.timezone)))} • ${tournament.city}',
+              style: GoogleFonts.poppins(fontSize: 12),
+              maxLines: 1,
+              overflow: TextOverflow.ellipsis,
+            ),
+            Row(
+              children: [
+                Icon(Icons.people, size: 12, color: Colors.grey[600]),
+                const SizedBox(width: 4),
+                Text(
+                  '$totalParticipants Participant${totalParticipants != 1 ? 's' : ''}',
+                  style: GoogleFonts.poppins(fontSize: 11, color: Colors.grey[600]),
+                ),
+              ],
+            ),
+          ],
         ),
         trailing: const Icon(Icons.chevron_right, color: Colors.grey),
         onTap: () => Navigator.push(
@@ -885,6 +952,7 @@ class _PlayPageState extends State<PlayPage> {
   }
 
   String _capitalizeSortOption(String sortBy) {
+    if (sortBy == 'eventParticipants') return 'Participants';
     return sortBy[0].toUpperCase() + sortBy.substring(1);
   }
 
@@ -1018,7 +1086,7 @@ class _PlayPageState extends State<PlayPage> {
                         ),
                       ),
                       Container(
-                        width: 115,
+                        width: 140,
                         height: 48,
                         decoration: BoxDecoration(
                           color: Colors.white,
@@ -1062,9 +1130,9 @@ class _PlayPageState extends State<PlayPage> {
                               ),
                             ),
                             PopupMenuItem(
-                              value: 'participants',
+                              value: 'eventParticipants',
                               child: Text(
-                                'Participants',
+                                'Event Participants',
                                 style: GoogleFonts.poppins(
                                   color: Colors.black,
                                   fontWeight: FontWeight.w400,
@@ -1142,7 +1210,7 @@ class _PlayPageState extends State<PlayPage> {
                       .map((doc) {
                         try {
                           final tournament = Tournament.fromFirestore(doc.data() as Map<String, dynamic>, doc.id);
-                          print('Parsed tournament: ${tournament.name}, id: ${tournament.id}, status: ${tournament.status}, startDate: ${tournament.startDate}, endDate: ${tournament.endDate}');
+                          print('Parsed tournament: ${tournament.name}, id: ${tournament.id}, status: ${tournament.status}, startDate: ${tournament.startDate}, endDate: ${tournament.endDate}, city: ${tournament.city}');
                           if (tournament.status != 'open') {
                             print('Skipping tournament ${tournament.id} with status ${tournament.status}');
                             return null;
@@ -1167,13 +1235,12 @@ class _PlayPageState extends State<PlayPage> {
                   final filteredTournaments = tournaments.where((tournament) {
                     final name = tournament.name.toLowerCase();
                     final venue = tournament.venue.toLowerCase();
-                    final city = tournament.city.toLowerCase();
-                    final matchesCity = city == widget.userCity.toLowerCase();
-
-                    final isNotCompleted = tournament.endDate == null || tournament.endDate!.isAfter(now);
-
-                    bool matchesGameFormat = _selectedGameFormat == null || tournament.gameFormat == _selectedGameFormat;
-
+                    final city = _normalizeCity(tournament.city);
+                    final gameType = tournament.gameType.toLowerCase();
+                    final eventNames = tournament.events.map((e) => e.name.toLowerCase()).join(' ');
+                    final matchesCity = widget.userCity.isEmpty || city == _normalizeCity(widget.userCity);
+                    final isNotCompleted = tournament.endDate.isAfter(now);
+                    final matchesGameType = _selectedGameType == null || tournament.gameType == _selectedGameType;
                     bool matchesDateRange = true;
                     if (_filterStartDate != null) {
                       matchesDateRange = tournament.startDate.isAfter(_filterStartDate!);
@@ -1181,21 +1248,27 @@ class _PlayPageState extends State<PlayPage> {
                     if (_filterEndDate != null) {
                       matchesDateRange = matchesDateRange && tournament.startDate.isBefore(_filterEndDate!.add(const Duration(days: 1)));
                     }
+                    final matchesSearch = name.contains(_searchQuery) ||
+                        venue.contains(_searchQuery) ||
+                        city.contains(_searchQuery) ||
+                        gameType.contains(_searchQuery) ||
+                        eventNames.contains(_searchQuery);
 
-                    print('Filtering event: ${tournament.name}, id: ${tournament.id}, city: $city, userCity: ${widget.userCity}, matchesCity: $matchesCity, isNotCompleted: $isNotCompleted, matchesGameFormat: $matchesGameFormat, matchesDateRange: $matchesDateRange');
-                    return matchesCity &&
-                        (name.contains(_searchQuery) || venue.contains(_searchQuery) || city.contains(_searchQuery)) &&
-                        isNotCompleted &&
-                        matchesGameFormat &&
-                        matchesDateRange;
+                    print('Filtering event: ${tournament.name}, id: ${tournament.id}, city: $city, userCity: ${_normalizeCity(widget.userCity)}, matchesCity: $matchesCity, isNotCompleted: $isNotCompleted, matchesGameType: $matchesGameType, matchesDateRange: $matchesDateRange, matchesSearch: $matchesSearch');
+                    return matchesCity && isNotCompleted && matchesGameType && matchesDateRange && matchesSearch;
                   }).toList();
 
+                  // FIX: Sort tournaments from latest to oldest (newest first)
                   if (_sortBy == 'date') {
-                    filteredTournaments.sort((a, b) => a.startDate.compareTo(b.startDate));
+                    filteredTournaments.sort((a, b) => b.startDate.compareTo(a.startDate)); // Changed to descending order
                   } else if (_sortBy == 'name') {
                     filteredTournaments.sort((a, b) => a.name.compareTo(b.name));
-                  } else if (_sortBy == 'participants') {
-                    filteredTournaments.sort((a, b) => b.participants.length.compareTo(a.participants.length));
+                  } else if (_sortBy == 'eventParticipants') {
+                    filteredTournaments.sort((a, b) {
+                      final aParticipants = a.events.fold(0, (su, event) => su + event.participants.length);
+                      final bParticipants = b.events.fold(0, (su, event) => su + event.participants.length);
+                      return bParticipants.compareTo(aParticipants); // Changed to descending order
+                    });
                   }
 
                   if (filteredTournaments.isEmpty) {
@@ -1261,7 +1334,7 @@ class _PlayPageState extends State<PlayPage> {
                           return SliverGrid(
                             gridDelegate: const SliverGridDelegateWithFixedCrossAxisCount(
                               crossAxisCount: 2,
-                              childAspectRatio: 0.8,
+                              childAspectRatio: 0.75,
                               mainAxisSpacing: 8,
                               crossAxisSpacing: 8,
                             ),

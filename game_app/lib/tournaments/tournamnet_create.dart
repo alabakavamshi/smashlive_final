@@ -1,7 +1,11 @@
 import 'dart:async';
+import 'dart:convert';
 import 'package:cloud_firestore/cloud_firestore.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:game_app/models/tournament.dart';
+import 'package:game_app/organiser_pages/organiserhomepage.dart';
+import 'package:game_app/tournaments/event_form_page.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:toastification/toastification.dart';
@@ -9,6 +13,10 @@ import 'package:geolocator/geolocator.dart';
 import 'package:geocoding/geocoding.dart';
 import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz;
+import 'package:image_picker/image_picker.dart';
+import 'dart:io';
+import 'package:http/http.dart' as http;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 class CreateTournamentPage extends StatefulWidget {
   final String userId;
@@ -35,22 +43,28 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
   static const Color borderColor = Color(0xFFB0B0B0);
   static const Color successColor = Color(0xFF4CAF50);
   static const Color errorColor = Color(0xFFF44336);
-  static const Color highlightColor = Color(0xFFE0E0E0);
 
   final _formKey = GlobalKey<FormState>();
   final _nameController = TextEditingController();
+  final _descriptionController = TextEditingController();
   final _venueController = TextEditingController();
+  final _venueAddressController = TextEditingController();
   final _cityController = TextEditingController();
   final _entryFeeController = TextEditingController();
+  final _extraFeeController = TextEditingController();
   final _rulesController = TextEditingController();
   final _maxParticipantsController = TextEditingController();
+  final _contactNameController = TextEditingController();
+  final _contactNumberController = TextEditingController();
   tz.TZDateTime? _selectedDate;
   TimeOfDay? _selectedTime;
   tz.TZDateTime? _selectedEndDate;
-  String _playStyle = "Men's Singles";
-  String _eventType = 'Knockout';
-  bool _bringOwnEquipment = false;
-  bool _costShared = false;
+  tz.TZDateTime? _registrationEndDate;
+  final String _playStyle = "Men's Singles";
+  final String _eventType = 'Knockout';
+  final bool _bringOwnEquipment = false;
+  final bool _costShared = false;
+  bool _canPayAtVenue = false;
   bool _isLoading = false;
   String? _fetchedCity;
   bool _isFetchingLocation = false;
@@ -60,513 +74,122 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
   late Animation<double> _fadeAnimation;
   late Animation<Offset> _slideAnimation;
   Timer? _debounceTimer;
-  String _selectedTimezone = 'UTC'; // Default to UTC
+  String _selectedTimezone = 'UTC';
+  File? _profileImage;
+  File? _sponsorImage;
+  bool _isFetchingSuggestions = false;
+  final FocusNode _cityFocusNode = FocusNode();
+  OverlayEntry? _overlayEntry;
+  List<String> _citySuggestions = [];
+  final String _googlePlacesApiKey = dotenv.get('GOOGLE_PLACES_API_KEY');
 
   static const Map<String, String> _cityToTimezone = {
+    // North America
     'new york': 'America/New_York',
     'los angeles': 'America/Los_Angeles',
-    'california': 'America/Los_Angeles',
-    'san francisco': 'America/Los_Angeles',
     'chicago': 'America/Chicago',
-    'houston': 'America/Chicago',
     'phoenix': 'America/Phoenix',
-    'philadelphia': 'America/New_York',
-    'san antonio': 'America/Chicago',
-    'san diego': 'America/Los_Angeles',
-    'dallas': 'America/Chicago',
-    'austin': 'America/Chicago',
+    'denver': 'America/Denver',
+    'anchorage': 'America/Anchorage',
+    'honolulu': 'Pacific/Honolulu',
     'toronto': 'America/Toronto',
-    'montreal': 'America/Toronto',
     'vancouver': 'America/Vancouver',
-    'calgary': 'America/Edmonton',
-    'ottawa': 'America/Toronto',
     'mexico city': 'America/Mexico_City',
-    'tijuana': 'America/Tijuana',
-    'monterrey': 'America/Monterrey',
+    'montreal': 'America/Toronto',
+    'calgary': 'America/Edmonton',
+    'winnipeg': 'America/Winnipeg',
+    'halifax': 'America/Halifax',
+    'st. john\'s': 'America/St_Johns',
+    // South America
+    'buenos aires': 'America/Argentina/Buenos_Aires',
+    'sao paulo': 'America/Sao_Paulo',
+    'rio de janeiro': 'America/Sao_Paulo',
+    'lima': 'America/Lima',
+    'bogota': 'America/Bogota',
+    'santiago': 'America/Santiago',
+    'caracas': 'America/Caracas',
+    // Europe
     'london': 'Europe/London',
     'paris': 'Europe/Paris',
     'berlin': 'Europe/Berlin',
     'rome': 'Europe/Rome',
     'madrid': 'Europe/Madrid',
+    'amsterdam': 'Europe/Amsterdam',
+    'brussels': 'Europe/Brussels',
+    'vienna': 'Europe/Vienna',
+    'prague': 'Europe/Prague',
+    'budapest': 'Europe/Budapest',
+    'warsaw': 'Europe/Warsaw',
+    'stockholm': 'Europe/Stockholm',
+    'oslo': 'Europe/Oslo',
+    'copenhagen': 'Europe/Copenhagen',
+    'helsinki': 'Europe/Helsinki',
+    'athens': 'Europe/Athens',
+    'lisbon': 'Europe/Lisbon',
+    'dublin': 'Europe/Dublin',
+    'zurich': 'Europe/Zurich',
+    'moscow': 'Europe/Moscow',
+    'istanbul': 'Europe/Istanbul',
+    // Asia
     'mumbai': 'Asia/Kolkata',
     'delhi': 'Asia/Kolkata',
     'bangalore': 'Asia/Kolkata',
-    'hyderabad': 'Asia/Kolkata',
     'chennai': 'Asia/Kolkata',
     'kolkata': 'Asia/Kolkata',
+    'hyderabad': 'Asia/Kolkata',
     'singapore': 'Asia/Singapore',
-    'tokyo': 'Asia/Tokyo',
+    'kuala lumpur': 'Asia/Kuala_Lumpur',
+    'jakarta': 'Asia/Jakarta',
+    'bangkok': 'Asia/Bangkok',
+    'manila': 'Asia/Manila',
+    'hanoi': 'Asia/Bangkok',
+    'ho chi minh city': 'Asia/Bangkok',
     'beijing': 'Asia/Shanghai',
     'shanghai': 'Asia/Shanghai',
     'hong kong': 'Asia/Hong_Kong',
+    'taipei': 'Asia/Taipei',
+    'seoul': 'Asia/Seoul',
+    'tokyo': 'Asia/Tokyo',
+    'osaka': 'Asia/Tokyo',
     'dubai': 'Asia/Dubai',
+    'abu dhabi': 'Asia/Dubai',
+    'riyadh': 'Asia/Riyadh',
+    'doha': 'Asia/Qatar',
+    'tel aviv': 'Asia/Jerusalem',
+    'jerusalem': 'Asia/Jerusalem',
+    'baghdad': 'Asia/Baghdad',
+    'tehran': 'Asia/Tehran',
+    'karachi': 'Asia/Karachi',
+    'dhaka': 'Asia/Dhaka',
+    // Australia & Pacific
     'sydney': 'Australia/Sydney',
     'melbourne': 'Australia/Melbourne',
     'brisbane': 'Australia/Brisbane',
     'perth': 'Australia/Perth',
-    'sao paulo': 'America/Sao_Paulo',
-    'rio de janeiro': 'America/Sao_Paulo',
-    'buenos aires': 'America/Argentina/Buenos_Aires',
-    'lima': 'America/Lima',
+    'adelaide': 'Australia/Adelaide',
+    'darwin': 'Australia/Darwin',
+    'hobart': 'Australia/Hobart',
+    'auckland': 'Pacific/Auckland',
+    'wellington': 'Pacific/Auckland',
+    'fiji': 'Pacific/Fiji',
+    // Africa
     'cairo': 'Africa/Cairo',
+    'johannesburg': 'Africa/Johannesburg',
+    'cape town': 'Africa/Johannesburg',
     'nairobi': 'Africa/Nairobi',
     'lagos': 'Africa/Lagos',
-    'johannesburg': 'Africa/Johannesburg',
+    'accra': 'Africa/Accra',
+    'casablanca': 'Africa/Casablanca',
+    'tunis': 'Africa/Tunis',
+    'algiers': 'Africa/Algiers',
   };
 
-  static const List<String> _allTimezones = [
-   'UTC',
-    'Africa/Abidjan',
-    'Africa/Accra',
-    'Africa/Addis_Ababa',
-    'Africa/Algiers',
-    'Africa/Asmara',
-    'Africa/Bamako',
-    'Africa/Bangui',
-    'Africa/Banjul',
-    'Africa/Bissau',
-    'Africa/Blantyre',
-    'Africa/Brazzaville',
-    'Africa/Bujumbura',
-    'Africa/Cairo',
-    'Africa/Casablanca',
-    'Africa/Ceuta',
-    'Africa/Conakry',
-    'Africa/Dakar',
-    'Africa/Dar_es_Salaam',
-    'Africa/Djibouti',
-    'Africa/Douala',
-    'Africa/El_Aaiun',
-    'Africa/Freetown',
-    'Africa/Gaborone',
-    'Africa/Harare',
-    'Africa/Johannesburg',
-    'Africa/Juba',
-    'Africa/Kampala',
-    'Africa/Khartoum',
-    'Africa/Kigali',
-    'Africa/Kinshasa',
-    'Africa/Lagos',
-    'Africa/Libreville',
-    'Africa/Lome',
-    'Africa/Luanda',
-    'Africa/Lubumbashi',
-    'Africa/Lusaka',
-    'Africa/Malabo',
-    'Africa/Maputo',
-    'Africa/Maseru',
-    'Africa/Mbabane',
-    'Africa/Mogadishu',
-    'Africa/Monrovia',
-    'Africa/Nairobi',
-    'Africa/Ndjamena',
-    'Africa/Niamey',
-    'Africa/Nouakchott',
-    'Africa/Ouagadougou',
-    'Africa/Porto-Novo',
-    'Africa/Sao_Tome',
-    'Africa/Tripoli',
-    'Africa/Tunis',
-    'Africa/Windhoek',
-    'America/Adak',
-    'America/Anchorage',
-    'America/Anguilla',
-    'America/Antigua',
-    'America/Araguaina',
-    'America/Argentina/Buenos_Aires',
-    'America/Argentina/Catamarca',
-    'America/Argentina/Cordoba',
-    'America/Argentina/Jujuy',
-    'America/Argentina/La_Rioja',
-    'America/Argentina/Mendoza',
-    'America/Argentina/Rio_Gallegos',
-    'America/Argentina/Salta',
-    'America/Argentina/San_Juan',
-    'America/Argentina/San_Luis',
-    'America/Argentina/Tucuman',
-    'America/Argentina/Ushuaia',
-    'America/Aruba',
-    'America/Asuncion',
-    'America/Atikokan',
-    'America/Bahia',
-    'America/Bahia_Banderas',
-    'America/Barbados',
-    'America/Belem',
-    'America/Belize',
-    'America/Blanc-Sablon',
-    'America/Boa_Vista',
-    'America/Bogota',
-    'America/Boise',
-    'America/Cambridge_Bay',
-    'America/Campo_Grande',
-    'America/Cancun',
-    'America/Caracas',
-    'America/Cayenne',
-    'America/Cayman',
-    'America/Chicago',
-    'America/Chihuahua',
-    'America/Costa_Rica',
-    'America/Creston',
-    'America/Cuiaba',
-    'America/Curacao',
-    'America/Danmarkshavn',
-    'America/Dawson',
-    'America/Dawson_Creek',
-    'America/Denver',
-    'America/Detroit',
-    'America/Dominica',
-    'America/Edmonton',
-    'America/Eirunepe',
-    'America/El_Salvador',
-    'America/Fort_Nelson',
-    'America/Fortaleza',
-    'America/Glace_Bay',
-    'America/Godthab',
-    'America/Goose_Bay',
-    'America/Grand_Turk',
-    'America/Grenada',
-    'America/Guadeloupe',
-    'America/Guatemala',
-    'America/Guayaquil',
-    'America/Guyana',
-    'America/Halifax',
-    'America/Havana',
-    'America/Hermosillo',
-    'America/Indiana/Indianapolis',
-    'America/Indiana/Knox',
-    'America/Indiana/Marengo',
-    'America/Indiana/Petersburg',
-    'America/Indiana/Tell_City',
-    'America/Indiana/Vevay',
-    'America/Indiana/Vincennes',
-    'America/Indiana/Winamac',
-    'America/Inuvik',
-    'America/Iqaluit',
-    'America/Jamaica',
-    'America/Juneau',
-    'America/Kentucky/Louisville',
-    'America/Kentucky/Monticello',
-    'America/Kralendijk',
-    'America/La_Paz',
-    'America/Lima',
-    'America/Los_Angeles',
-    'America/Lower_Princes',
-    'America/Maceio',
-    'America/Managua',
-    'America/Manaus',
-    'America/Marigot',
-    'America/Martinique',
-    'America/Matamoros',
-    'America/Mazatlan',
-    'America/Menominee',
-    'America/Merida',
-    'America/Metlakatla',
-    'America/Mexico_City',
-    'America/Miquelon',
-    'America/Moncton',
-    'America/Monterrey',
-    'America/Montevideo',
-    'America/Montserrat',
-    'America/Nassau',
-    'America/New_York',
-    'America/Nipigon',
-    'America/Nome',
-    'America/Noronha',
-    'America/North_Dakota/Beulah',
-    'America/North_Dakota/Center',
-    'America/North_Dakota/New_Salem',
-    'America/Ojinaga',
-    'America/Panama',
-    'America/Pangnirtung',
-    'America/Paramaribo',
-    'America/Phoenix',
-    'America/Port-au-Prince',
-    'America/Port_of_Spain',
-    'America/Porto_Velho',
-    'America/Puerto_Rico',
-    'America/Punta_Arenas',
-    'America/Rainy_River',
-    'America/Rankin_Inlet',
-    'America/Recife',
-    'America/Regina',
-    'America/Resolute',
-    'America/Rio_Branco',
-    'America/Santarem',
-    'America/Santo_Domingo',
-    'America/Sao_Paulo',
-    'America/Scoresbysund',
-    'America/Sitka',
-    'America/St_Barthelemy',
-    'America/St_Johns',
-    'America/St_Kitts',
-    'America/St_Lucia',
-    'America/St_Thomas',
-    'America/St_Vincent',
-    'America/Swift_Current',
-    'America/Tegucigalpa',
-    'America/Thule',
-    'America/Thunder_Bay',
-    'America/Tijuana',
-    'America/Toronto',
-    'America/Tortola',
-    'America/Vancouver',
-    'America/Whitehorse',
-    'America/Winnipeg',
-    'America/Yakutat',
-    'America/Yellowknife',
-    'Antarctica/Casey',
-    'Antarctica/Davis',
-    'Antarctica/DumontDUrville',
-    'Antarctica/Macquarie',
-    'Antarctica/Mawson',
-    'Antarctica/McMurdo',
-    'Antarctica/Palmer',
-    'Antarctica/Rothera',
-    'Antarctica/Syowa',
-    'Antarctica/Troll',
-    'Antarctica/Vostok',
-    'Asia/Almaty',
-    'Asia/Amman',
-    'Asia/Anadyr',
-    'Asia/Aqtau',
-    'Asia/Aqtobe',
-    'Asia/Ashgabat',
-    'Asia/Atyrau',
-    'Asia/Baghdad',
-    'Asia/Bahrain',
-    'Asia/Baku',
-    'Asia/Bangkok',
-    'Asia/Barnaul',
-    'Asia/Beirut',
-    'Asia/Bishkek',
-    'Asia/Brunei',
-    'Asia/Chita',
-    'Asia/Choibalsan',
-    'Asia/Colombo',
-    'Asia/Damascus',
-    'Asia/Dhaka',
-    'Asia/Dili',
-    'Asia/Dubai',
-    'Asia/Dushanbe',
-    'Asia/Famagusta',
-    'Asia/Gaza',
-    'Asia/Hebron',
-    'Asia/Ho_Chi_Minh',
-    'Asia/Hong_Kong',
-    'Asia/Hovd',
-    'Asia/Irkutsk',
-    'Asia/Jakarta',
-    'Asia/Jayapura',
-    'Asia/Jerusalem',
-    'Asia/Kabul',
-    'Asia/Kamchatka',
-    'Asia/Karachi',
-    'Asia/Kathmandu',
-    'Asia/Khandyga',
-    'Asia/Kolkata',
-    'Asia/Krasnoyarsk',
-    'Asia/Kuala_Lumpur',
-    'Asia/Kuching',
-    'Asia/Kuwait',
-    'Asia/Macau',
-    'Asia/Magadan',
-    'Asia/Makassar',
-    'Asia/Manila',
-    'Asia/Muscat',
-    'Asia/Nicosia',
-    'Asia/Novokuznetsk',
-    'Asia/Novosibirsk',
-    'Asia/Omsk',
-    'Asia/Oral',
-    'Asia/Phnom_Penh',
-    'Asia/Pontianak',
-    'Asia/Pyongyang',
-    'Asia/Qatar',
-    'Asia/Qostanay',
-    'Asia/Qyzylorda',
-    'Asia/Riyadh',
-    'Asia/Sakhalin',
-    'Asia/Samarkand',
-    'Asia/Seoul',
-    'Asia/Shanghai',
-    'Asia/Singapore',
-    'Asia/Srednekolymsk',
-    'Asia/Taipei',
-    'Asia/Tashkent',
-    'Asia/Tbilisi',
-    'Asia/Tehran',
-    'Asia/Thimphu',
-    'Asia/Tokyo',
-    'Asia/Tomsk',
-    'Asia/Ulaanbaatar',
-    'Asia/Urumqi',
-    'Asia/Ust-Nera',
-    'Asia/Vientiane',
-    'Asia/Vladivostok',
-    'Asia/Yakutsk',
-    'Asia/Yangon',
-    'Asia/Yekaterinburg',
-    'Asia/Yerevan',
-    'Atlantic/Azores',
-    'Atlantic/Bermuda',
-    'Atlantic/Canary',
-    'Atlantic/Cape_Verde',
-    'Atlantic/Faroe',
-    'Atlantic/Madeira',
-    'Atlantic/Reykjavik',
-    'Atlantic/South_Georgia',
-    'Atlantic/St_Helena',
-    'Atlantic/Stanley',
-    'Australia/Adelaide',
-    'Australia/Brisbane',
-    'Australia/Broken_Hill',
-    'Australia/Currie',
-    'Australia/Darwin',
-    'Australia/Eucla',
-    'Australia/Hobart',
-    'Australia/Lindeman',
-    'Australia/Lord_Howe',
-    'Australia/Melbourne',
-    'Australia/Perth',
-    'Australia/Sydney',
-    'Europe/Amsterdam',
-    'Europe/Andorra',
-    'Europe/Astrakhan',
-    'Europe/Athens',
-    'Europe/Belgrade',
-    'Europe/Berlin',
-    'Europe/Bratislava',
-    'Europe/Brussels',
-    'Europe/Bucharest',
-    'Europe/Budapest',
-    'Europe/Busingen',
-    'Europe/Chisinau',
-    'Europe/Copenhagen',
-    'Europe/Dublin',
-    'Europe/Gibraltar',
-    'Europe/Guernsey',
-    'Europe/Helsinki',
-    'Europe/Isle_of_Man',
-    'Europe/Istanbul',
-    'Europe/Jersey',
-    'Europe/Kaliningrad',
-    'Europe/Kiev',
-    'Europe/Kirov',
-    'Europe/Lisbon',
-    'Europe/Ljubljana',
-    'Europe/London',
-    'Europe/Luxembourg',
-    'Europe/Madrid',
-    'Europe/Malta',
-    'Europe/Mariehamn',
-    'Europe/Minsk',
-    'Europe/Monaco',
-    'Europe/Moscow',
-    'Europe/Oslo',
-    'Europe/Paris',
-    'Europe/Podgorica',
-    'Europe/Prague',
-    'Europe/Riga',
-    'Europe/Rome',
-    'Europe/Samara',
-    'Europe/San_Marino',
-    'Europe/Sarajevo',
-    'Europe/Saratov',
-    'Europe/Simferopol',
-    'Europe/Skopje',
-    'Europe/Sofia',
-    'Europe/Stockholm',
-    'Europe/Tallinn',
-    'Europe/Tirane',
-    'Europe/Ulyanovsk',
-    'Europe/Uzhgorod',
-    'Europe/Vaduz',
-    'Europe/Vatican',
-    'Europe/Vienna',
-    'Europe/Vilnius',
-    'Europe/Volgograd',
-    'Europe/Warsaw',
-    'Europe/Zagreb',
-    'Europe/Zaporozhye',
-    'Europe/Zurich',
-    'Indian/Antananarivo',
-    'Indian/Chagos',
-    'Indian/Christmas',
-    'Indian/Cocos',
-    'Indian/Comoro',
-    'Indian/Kerguelen',
-    'Indian/Mahe',
-    'Indian/Maldives',
-    'Indian/Mauritius',
-    'Indian/Mayotte',
-    'Indian/Reunion',
-    'Pacific/Apia',
-    'Pacific/Auckland',
-    'Pacific/Bougainville',
-    'Pacific/Chatham',
-    'Pacific/Chuuk',
-    'Pacific/Easter',
-    'Pacific/Efate',
-    'Pacific/Enderbury',
-    'Pacific/Fakaofo',
-    'Pacific/Fiji',
-    'Pacific/Funafuti',
-    'Pacific/Galapagos',
-    'Pacific/Gambier',
-    'Pacific/Guadalcanal',
-    'Pacific/Guam',
-    'Pacific/Honolulu',
-    'Pacific/Kiritimati',
-    'Pacific/Kosrae',
-    'Pacific/Kwajalein',
-    'Pacific/Majuro',
-    'Pacific/Marquesas',
-    'Pacific/Midway',
-    'Pacific/Nauru',
-    'Pacific/Niue',
-    'Pacific/Norfolk',
-    'Pacific/Noumea',
-    'Pacific/Pago_Pago',
-    'Pacific/Palau',
-    'Pacific/Pitcairn',
-    'Pacific/Pohnpei',
-    'Pacific/Port_Moresby',
-    'Pacific/Rarotonga',
-    'Pacific/Saipan',
-    'Pacific/Tahiti',
-    'Pacific/Tarawa',
-    'Pacific/Tongatapu',
-    'Pacific/Wake',
-    'Pacific/Wallis',
-    'Etc/GMT',
-    'Etc/GMT+1',
-    'Etc/GMT+2',
-    'Etc/GMT+3',
-    'Etc/GMT+4',
-    'Etc/GMT+5',
-    'Etc/GMT+6',
-    'Etc/GMT+7',
-    'Etc/GMT+8',
-    'Etc/GMT+9',
-    'Etc/GMT+10',
-    'Etc/GMT+11',
-    'Etc/GMT+12',
-    'Etc/GMT-1',
-    'Etc/GMT-2',
-    'Etc/GMT-3',
-    'Etc/GMT-4',
-    'Etc/GMT-5',
-    'Etc/GMT-6',
-    'Etc/GMT-7',
-    'Etc/GMT-8',
-    'Etc/GMT-9',
-    'Etc/GMT-10',
-    'Etc/GMT-11',
-    'Etc/GMT-12',
-    'Etc/GMT-13',
-    'Etc/GMT-14',
-    'Etc/UTC',
-  ];
+  final List<String> _allTimezones = tz.timeZoneDatabase.locations.keys.toList()
+    ..sort((a, b) => a.compareTo(b));
+
+  bool _showTimezoneDropdown = false;
+  final LayerLink _timezoneLayerLink = LayerLink();
+  OverlayEntry? _timezoneOverlayEntry;
 
   @override
   void initState() {
@@ -575,16 +198,203 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     _initializeAnimations();
     _initLocationServices();
     tz.initializeTimeZones();
+
+    _cityFocusNode.addListener(() {
+      if (!_cityFocusNode.hasFocus) {
+        _removeOverlay();
+      }
+    });
   }
 
   String _defaultRules() {
     return '''
-1. Matches follow BWF regulations - best of 3 games to 21 points (rally point scoring)
+1. Matches follow BWF regulations - best of 3 games to 21 points
 2. Players must report 15 minutes before scheduled match time
 3. Proper sports attire and non-marking shoes required
-4. Tournament director reserves the right to modify rules as needed
-5. Any disputes will be resolved by the tournament committee
+4. Tournament director reserves right to modify rules
+5. Disputes resolved by tournament committee
 ''';
+  }
+
+  void _removeOverlay() {
+    if (_overlayEntry != null) {
+      try {
+        _overlayEntry?.remove();
+      } catch (e) {
+        print('Error removing overlay: $e');
+      } finally {
+        _overlayEntry = null;
+      }
+    }
+  }
+
+  Future<void> _fetchCitySuggestions(String query) async {
+    if (query.isEmpty || query.length < 2) {
+      setState(() {
+        _isFetchingSuggestions = false;
+        _citySuggestions = [];
+      });
+      _removeOverlay();
+      return;
+    }
+
+    setState(() {
+      _isFetchingSuggestions = true;
+    });
+
+    try {
+      final url = Uri.parse(
+        'https://maps.googleapis.com/maps/api/place/autocomplete/json?input=$query&types=(cities)&key=$_googlePlacesApiKey',
+      );
+
+      final response = await http.get(url);
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        final predictions = data['predictions'] as List<dynamic>?;
+
+        if (predictions != null && predictions.isNotEmpty) {
+          final suggestions = predictions
+              .map<String>((prediction) => prediction['description'] as String)
+              .where((city) => city.isNotEmpty)
+              .toList();
+
+          setState(() {
+            _citySuggestions = suggestions;
+            _isFetchingSuggestions = false;
+          });
+
+          if (_citySuggestions.isNotEmpty && context.mounted) {
+            final renderBox = context.findRenderObject() as RenderBox?;
+            if (renderBox != null) {
+              _showSuggestionsOverlay(_citySuggestions, context, renderBox);
+            }
+          } else {
+            _removeOverlay();
+          }
+        } else {
+          setState(() {
+            _citySuggestions = [];
+            _isFetchingSuggestions = false;
+          });
+          _removeOverlay();
+          _fetchCitySuggestionsFallback(query);
+        }
+      } else {
+        setState(() {
+          _isFetchingSuggestions = false;
+        });
+        _removeOverlay();
+        _fetchCitySuggestionsFallback(query);
+      }
+    } catch (e) {
+      setState(() {
+        _isFetchingSuggestions = false;
+      });
+      _removeOverlay();
+      _fetchCitySuggestionsFallback(query);
+    }
+  }
+
+  Future<void> _fetchCitySuggestionsFallback(String query) async {
+    try {
+      final locations = await locationFromAddress(query);
+      final placemarks = await Future.wait(
+        locations.take(5).map((loc) => placemarkFromCoordinates(loc.latitude, loc.longitude)),
+      );
+
+      final suggestions = placemarks
+          .expand((placemarkList) => placemarkList)
+          .map((placemark) => placemark.locality ?? placemark.administrativeArea ?? '')
+          .where((city) => city.isNotEmpty)
+          .toSet()
+          .toList();
+
+      setState(() {
+        _citySuggestions = suggestions;
+        _isFetchingSuggestions = false;
+      });
+
+      if (_citySuggestions.isNotEmpty && context.mounted) {
+        final renderBox = context.findRenderObject() as RenderBox?;
+        if (renderBox != null) {
+          _showSuggestionsOverlay(_citySuggestions, context, renderBox);
+        }
+      } else {
+        _removeOverlay();
+      }
+    } catch (e) {
+      setState(() {
+        _isFetchingSuggestions = false;
+      });
+      _removeOverlay();
+    }
+  }
+
+  void _showSuggestionsOverlay(List<String> suggestions, BuildContext context, RenderBox renderBox) {
+    _removeOverlay();
+
+    if (!context.mounted) return;
+
+    final width = renderBox.size.width;
+    final offset = renderBox.localToGlobal(Offset.zero);
+
+    _overlayEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        left: offset.dx,
+        top: offset.dy + renderBox.size.height + 4,
+        width: width,
+        child: Material(
+          elevation: 4,
+          borderRadius: BorderRadius.circular(8),
+          child: Container(
+            constraints: const BoxConstraints(maxHeight: 200),
+            decoration: BoxDecoration(
+              color: secondaryColor,
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.1),
+                  blurRadius: 8,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: ListView.builder(
+              shrinkWrap: true,
+              padding: EdgeInsets.zero,
+              itemCount: suggestions.length,
+              itemBuilder: (context, index) {
+                final city = suggestions[index];
+                return ListTile(
+                  title: Text(
+                    city,
+                    style: GoogleFonts.poppins(
+                      color: textPrimary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  onTap: () {
+                    setState(() {
+                      _cityController.text = city;
+                      _isCityValid = true;
+                      _selectedTimezone = _getTimezoneForCity(city.toLowerCase());
+                    });
+                    _validateCityWithGeocoding(city);
+                    _removeOverlay();
+                    _cityFocusNode.unfocus();
+                  },
+                );
+              },
+            ),
+          ),
+        ),
+      ),
+    );
+
+    if (context.mounted) {
+      Overlay.of(context).insert(_overlayEntry!);
+    }
   }
 
   Future<void> _validateCityWithGeocoding(String city) async {
@@ -600,47 +410,80 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
       _isValidatingCity = true;
     });
 
-    final timezone = _getTimezoneForCity(city);
     try {
-      tz.getLocation(timezone);
-      setState(() {
-        _isCityValid = true;
-        _selectedTimezone = timezone;
-        _isValidatingCity = false;
-      });
-    } catch (e) {
-      try {
+      String timezone = _getTimezoneForCity(city);
+
+      if (timezone == 'UTC') {
         final locations = await locationFromAddress(city);
-        if (locations.isEmpty) {
-          throw Exception('No location found');
+        if (locations.isNotEmpty) {
+          final place = locations.first;
+          try {
+            final timezoneName = await _getTimezoneFromCoordinates(
+              place.latitude,
+              place.longitude,
+            );
+            if (timezoneName != null) {
+              timezone = timezoneName;
+            } else {
+              final placemarks = await placemarkFromCoordinates(
+                place.latitude,
+                place.longitude,
+              );
+              if (placemarks.isNotEmpty) {
+                final countryCode = placemarks.first.isoCountryCode?.toLowerCase();
+                timezone = _getCountryTimezone(countryCode) ?? 'UTC';
+              }
+            }
+          } catch (e) {
+            print('Error getting timezone from coordinates: $e');
+            timezone = 'UTC';
+          }
         }
+      }
 
-        final place = locations.first;
-        final placemarks = await placemarkFromCoordinates(place.latitude, place.longitude);
-        final countryCode = placemarks.first.isoCountryCode?.toLowerCase();
-        final timezone = _getCountryTimezone(countryCode) ?? 'UTC';
-
-        try {
-          tz.getLocation(timezone);
-          setState(() {
-            _isCityValid = true;
-            _selectedTimezone = timezone;
-            _isValidatingCity = false;
-          });
-        } catch (e) {
-          setState(() {
-            _isCityValid = false;
-            _selectedTimezone = 'UTC';
-            _isValidatingCity = false;
-          });
-        }
+      try {
+        tz.getLocation(timezone);
+        setState(() {
+          _isCityValid = true;
+          _selectedTimezone = timezone;
+          _isValidatingCity = false;
+        });
       } catch (e) {
         setState(() {
-          _isCityValid = false;
+          _isCityValid = true;
           _selectedTimezone = 'UTC';
           _isValidatingCity = false;
         });
       }
+    } catch (e) {
+      setState(() {
+        _isCityValid = false;
+        _selectedTimezone = 'UTC';
+        _isValidatingCity = false;
+      });
+    }
+  }
+
+  Future<String?> _getTimezoneFromCoordinates(double lat, double lng) async {
+    try {
+      final timestamp = DateTime.now().millisecondsSinceEpoch ~/ 1000;
+      final response = await http.get(
+        Uri.parse(
+          'https://maps.googleapis.com/maps/api/timezone/json?'
+          'location=$lat,$lng&timestamp=$timestamp&key=$_googlePlacesApiKey',
+        ),
+      );
+
+      if (response.statusCode == 200) {
+        final data = json.decode(response.body);
+        if (data['status'] == 'OK') {
+          return data['timeZoneId'];
+        }
+      }
+      return null;
+    } catch (e) {
+      print('Error fetching timezone from coordinates: $e');
+      return null;
     }
   }
 
@@ -666,33 +509,27 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     if (_cityToTimezone.containsKey(cityLower)) {
       return _cityToTimezone[cityLower]!;
     }
-    if (cityLower.contains('california') || 
-        cityLower.contains('san francisco') || 
-        cityLower.contains('los angeles') ||
-        cityLower.contains('san diego')) {
-      return 'America/Los_Angeles';
+    for (final entry in _cityToTimezone.entries) {
+      if (cityLower.contains(entry.key) || entry.key.contains(cityLower)) {
+        return entry.value;
+      }
     }
-    if (cityLower.contains('texas') || 
-        cityLower.contains('houston') || 
-        cityLower.contains('dallas') ||
-        cityLower.contains('austin')) {
-      return 'America/Chicago';
-    }
-    if (cityLower.contains('new york')) {
-      return 'America/New_York';
-    }
-    final countryTimezone = _getCountryTimezone(cityLower);
-    return countryTimezone ?? 'UTC';
+    return 'UTC';
   }
 
-  Future<void> _selectDate(BuildContext context) async {
+  Future<void> _selectDate(BuildContext context, {required bool isStartDate, bool isRegistration = false}) async {
     final timeZone = tz.getLocation(_selectedTimezone);
     final now = tz.TZDateTime.now(timeZone);
 
+    DateTime firstDate = now;
+    if (!isStartDate && !isRegistration && _selectedDate != null) {
+      firstDate = _selectedDate!;
+    }
+
     final DateTime? picked = await showDatePicker(
       context: context,
-      initialDate: now,
-      firstDate: now,
+      initialDate: isStartDate || isRegistration ? now : (_selectedEndDate ?? (_selectedDate ?? now)),
+      firstDate: firstDate,
       lastDate: now.add(const Duration(days: 365 * 2)),
       builder: (context, child) {
         return Theme(
@@ -706,6 +543,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
             textButtonTheme: TextButtonThemeData(
               style: TextButton.styleFrom(foregroundColor: accentColor),
             ),
+            dialogBackgroundColor: secondaryColor,
           ),
           child: child!,
         );
@@ -714,15 +552,32 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
 
     if (picked != null && mounted) {
       setState(() {
-        _selectedDate = tz.TZDateTime(
-          timeZone,
-          picked.year,
-          picked.month,
-          picked.day,
-        );
+        if (isRegistration) {
+          _registrationEndDate = tz.TZDateTime(
+            timeZone,
+            picked.year,
+            picked.month,
+            picked.day,
+          );
+        } else if (isStartDate) {
+          _selectedDate = tz.TZDateTime(
+            timeZone,
+            picked.year,
+            picked.month,
+            picked.day,
+          );
+        } else {
+          _selectedEndDate = tz.TZDateTime(
+            timeZone,
+            picked.year,
+            picked.month,
+            picked.day,
+          );
+        }
       });
-      debugPrint('Selected start date: $_selectedDate');
-      await _selectTime(context);
+      if (isStartDate && !isRegistration) {
+        await _selectTime(context);
+      }
     }
   }
 
@@ -755,50 +610,31 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
       setState(() {
         _selectedTime = picked;
       });
-      debugPrint('Selected start time: $_selectedTime');
     }
   }
 
-  Future<void> _selectEndDate(BuildContext context) async {
-    debugPrint('Opening end date picker');
-    final timeZone = tz.getLocation(_selectedTimezone);
-    final initialDate = _selectedDate ?? tz.TZDateTime.now(timeZone);
-
-    final DateTime? picked = await showDatePicker(
-      context: context,
-      initialDate: initialDate,
-      firstDate: initialDate,
-      lastDate: tz.TZDateTime.now(timeZone).add(const Duration(days: 365 * 2)),
-      builder: (context, child) {
-        return Theme(
-          data: Theme.of(context).copyWith(
-            colorScheme: ColorScheme.light(
-              primary: accentColor,
-              onPrimary: Colors.white,
-              surface: secondaryColor,
-              onSurface: textPrimary,
-            ),
-            dialogBackgroundColor: secondaryColor,
-            textButtonTheme: TextButtonThemeData(
-              style: TextButton.styleFrom(foregroundColor: accentColor),
-            ),
-          ),
-          child: child!,
-        );
-      },
-    );
-
-    if (picked != null && mounted) {
+  Future<void> _pickImage(bool isProfile) async {
+    final picker = ImagePicker();
+    final pickedFile = await picker.pickImage(source: ImageSource.gallery);
+    if (pickedFile != null && mounted) {
       setState(() {
-        _selectedEndDate = tz.TZDateTime(
-          timeZone,
-          picked.year,
-          picked.month,
-          picked.day,
-        );
+        if (isProfile) {
+          _profileImage = File(pickedFile.path);
+        } else {
+          _sponsorImage = File(pickedFile.path);
+        }
       });
-      debugPrint('Selected end date: $_selectedEndDate');
     }
+  }
+
+  void _discardImage(bool isProfile) {
+    setState(() {
+      if (isProfile) {
+        _profileImage = null;
+      } else {
+        _sponsorImage = null;
+      }
+    });
   }
 
   void _initializeAnimations() {
@@ -807,10 +643,10 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
       duration: const Duration(milliseconds: 300),
     );
     _fadeAnimation = Tween<double>(begin: 0.0, end: 1.0).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeIn),
+      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
     );
     _slideAnimation = Tween<Offset>(begin: const Offset(0, 0.1), end: Offset.zero).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeIn),
+      CurvedAnimation(parent: _animationController, curve: Curves.easeInOut),
     );
     _animationController.forward();
   }
@@ -819,17 +655,24 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
   void dispose() {
     _debounceTimer?.cancel();
     _nameController.dispose();
+    _descriptionController.dispose();
     _venueController.dispose();
+    _venueAddressController.dispose();
     _cityController.dispose();
     _entryFeeController.dispose();
+    _extraFeeController.dispose();
     _rulesController.dispose();
     _maxParticipantsController.dispose();
+    _contactNameController.dispose();
+    _contactNumberController.dispose();
     _animationController.dispose();
+    _cityFocusNode.dispose();
+    _removeOverlay();
+    _hideTimezoneDropdown();
     super.dispose();
   }
 
   Future<void> _initLocationServices() async {
-    debugPrint('Initializing location services');
     bool serviceEnabled = await Geolocator.isLocationServiceEnabled();
     if (!serviceEnabled) {
       _showErrorToast('Location Error', 'Location services are disabled');
@@ -846,7 +689,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     }
 
     if (permission == LocationPermission.deniedForever) {
-      _showErrorToast('Location Error', 'Location permissions are denied. Please enable them in app settings.');
+      _showErrorToast('Location Error', 'Location permissions denied. Please enable in settings.');
       return;
     }
 
@@ -861,7 +704,6 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     });
 
     try {
-      debugPrint('Fetching current location');
       Position position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.high,
         timeLimit: const Duration(seconds: 10),
@@ -871,7 +713,6 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
       try {
         placemarks = await placemarkFromCoordinates(position.latitude, position.longitude);
       } catch (e) {
-        debugPrint('High accuracy placemark failed: $e, falling back to medium');
         position = await Geolocator.getCurrentPosition(desiredAccuracy: LocationAccuracy.medium);
         placemarks = await placemarkFromCoordinates(position.latitude, position.longitude);
       }
@@ -879,9 +720,6 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
       if (placemarks.isNotEmpty && mounted) {
         final place = placemarks.first;
         final city = place.locality ?? place.administrativeArea ?? place.subAdministrativeArea ?? place.name;
-        debugPrint('Placemarks: ${placemarks.map((p) => p.toString()).toList()}');
-        debugPrint('Fetched city: $city');
-
         if (city != null && city.isNotEmpty) {
           final cityLower = city.toLowerCase();
           String timezoneName = _getTimezoneForCity(cityLower);
@@ -889,14 +727,14 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
             tz.getLocation(timezoneName);
             setState(() {
               _fetchedCity = city;
+              _cityController.text = city;
               _isCityValid = true;
               _selectedTimezone = timezoneName;
             });
-            debugPrint('Set city to $city with timezone $timezoneName');
           } catch (e) {
-            debugPrint('Invalid timezone from location: $timezoneName, defaulting to UTC');
             setState(() {
               _fetchedCity = city;
+              _cityController.text = city;
               _isCityValid = true;
               _selectedTimezone = 'UTC';
             });
@@ -909,10 +747,8 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
         _showErrorToast('Location Error', 'No placemarks found for the current location');
       }
     } on TimeoutException {
-      debugPrint('Location request timed out');
       _showErrorToast('Location Error', 'Location request timed out');
-    } catch (e, stackTrace) {
-      debugPrint('Failed to fetch location: $e\n$stackTrace');
+    } catch (e) {
       _showErrorToast('Location Error', 'Failed to fetch location: ${e.toString()}');
     } finally {
       if (mounted) {
@@ -925,41 +761,38 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
 
   void _debounceCityValidation(String value) {
     _debounceTimer?.cancel();
-    _debounceTimer = Timer(const Duration(milliseconds: 2000), () {
+    _debounceTimer = Timer(const Duration(milliseconds: 500), () {
+      _fetchCitySuggestions(value);
       _validateCityWithGeocoding(value);
     });
   }
 
-  Future<void> _createTournament() async {
-    debugPrint('Starting tournament creation');
+  Future<void> _createTournament(BuildContext context) async {
     if (!_formKey.currentState!.validate()) {
-      debugPrint('Form validation failed');
       return;
     }
 
-    // Validate required date/time fields
     if (_selectedDate == null || _selectedTime == null) {
-      debugPrint('Start date or time missing');
       _showErrorToast('Start Date & Time Required', 'Please select a start date and time');
       return;
     }
 
     if (_selectedEndDate == null) {
-      debugPrint('End date missing');
       _showErrorToast('End Date Required', 'Please select an end date');
       return;
     }
 
+    if (_registrationEndDate == null) {
+      _showErrorToast('Registration End Date Required', 'Please select a registration end date');
+      return;
+    }
+
     if (!_isCityValid) {
-      debugPrint('Invalid city');
       _showErrorToast('Invalid City', 'Please enter a valid city');
       return;
     }
 
-    // Get the selected timezone
     final timeZone = tz.getLocation(_selectedTimezone);
-
-    // Combine date and time in the selected timezone
     final startDateTimeLocal = tz.TZDateTime(
       timeZone,
       _selectedDate!.year,
@@ -968,11 +801,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
       _selectedTime!.hour,
       _selectedTime!.minute,
     );
-
-    // Convert to UTC for storage
     final startDateTimeUTC = startDateTimeLocal.toUtc();
-
-    // Create end date at end of day in local timezone
     final endDateLocal = tz.TZDateTime(
       timeZone,
       _selectedEndDate!.year,
@@ -980,76 +809,130 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
       _selectedEndDate!.day,
       23, 59, 59,
     );
-
-    // Convert to UTC for storage
     final endDateUTC = endDateLocal.toUtc();
+    final registrationEndLocal = tz.TZDateTime(
+      timeZone,
+      _registrationEndDate!.year,
+      _registrationEndDate!.month,
+      _registrationEndDate!.day,
+      _selectedTime!.hour,
+      _selectedTime!.minute,
+    );
+    final registrationEndUTC = registrationEndLocal.toUtc();
+    
+    // Get current time in the selected timezone
+    final currentTimeInTimezone = tz.TZDateTime.now(timeZone);
 
-    // Validate date ranges
+    // FIXED: Registration end date must be AFTER current time
+    if (registrationEndLocal.isBefore(currentTimeInTimezone)) {
+      _showErrorToast('Invalid Registration Date', 'Registration end date must be in the future');
+      return;
+    }
+
+    // Registration end date must be BEFORE tournament start date
+    if (registrationEndUTC.isAfter(startDateTimeUTC)) {
+      _showErrorToast('Invalid Registration Date', 'Registration must end before the tournament starts');
+      return;
+    }
+
     if (endDateUTC.isBefore(startDateTimeUTC)) {
-      debugPrint('Invalid date range: endDate $endDateUTC before startDateTime $startDateTimeUTC');
       _showErrorToast('Invalid Date Range', 'End date must be on or after start date');
       return;
     }
 
-    if (mounted) {
-      setState(() {
-        _isLoading = true;
-      });
+    final events = await Navigator.push<List<Event>>(
+      context,
+      MaterialPageRoute(
+        builder: (context) => EventFormPage(timezone: _selectedTimezone),
+      ),
+    );
+
+    if (events == null || events.isEmpty) {
+      _showErrorToast('No Events', 'Please add at least one event');
+      return;
     }
 
+    setState(() {
+      _isLoading = true;
+    });
+
     try {
-      debugPrint('Creating tournament document');
+      String? profileImageUrl;
+      String? sponsorImageUrl;
+
+      if (_profileImage != null) {
+        final profileStorageRef = FirebaseStorage.instance.ref().child(
+          'tournament_images/${DateTime.now().millisecondsSinceEpoch}_profile.jpg',
+        );
+        await profileStorageRef.putFile(_profileImage!);
+        profileImageUrl = await profileStorageRef.getDownloadURL();
+      }
+
+      if (_sponsorImage != null) {
+        final sponsorStorageRef = FirebaseStorage.instance.ref().child(
+          'sponsor_images/${DateTime.now().millisecondsSinceEpoch}_sponsor.jpg',
+        );
+        await sponsorStorageRef.putFile(_sponsorImage!);
+        sponsorImageUrl = await sponsorStorageRef.getDownloadURL();
+      }
+
       final tournamentRef = FirebaseFirestore.instance.collection('tournaments').doc();
 
       final newTournament = Tournament(
         id: tournamentRef.id,
         name: _nameController.text.trim(),
+        description: _descriptionController.text.trim().isNotEmpty ? _descriptionController.text.trim() : null,
         venue: _venueController.text.trim(),
         city: _cityController.text.trim(),
         startDate: startDateTimeUTC,
         endDate: endDateUTC,
+        registrationEnd: registrationEndUTC,
         entryFee: double.tryParse(_entryFeeController.text.trim()) ?? 0.0,
+        extraFee: double.tryParse(_extraFeeController.text.trim()),
+        canPayAtVenue: _canPayAtVenue,
         status: 'open',
         createdBy: widget.userId,
         createdAt: DateTime.now().toUtc(),
-        participants: [],
         rules: _rulesController.text.trim().isNotEmpty ? _rulesController.text.trim() : null,
-        maxParticipants: int.tryParse(_maxParticipantsController.text.trim()) ?? 1,
         gameFormat: _playStyle,
         gameType: _eventType,
         bringOwnEquipment: _bringOwnEquipment,
         costShared: _costShared,
-        profileImage: null,
+        profileImage: profileImageUrl,
+        sponsorImage: sponsorImageUrl,
+        contactName: _contactNameController.text.trim(),
+        contactNumber: _contactNumberController.text.trim(),
         timezone: _selectedTimezone,
+        events: events,
       );
 
+      // FIXED: Firestore response parsing error - use proper serialization
       final tournamentData = newTournament.toFirestore();
-      debugPrint('Tournament data: $tournamentData');
-
-      // Final validation
-      if (newTournament.name.isEmpty || newTournament.venue.isEmpty || newTournament.city.isEmpty) {
-        throw Exception('Required fields are empty');
-      }
-
       await tournamentRef.set(tournamentData);
-      debugPrint('Tournament created successfully: ${newTournament.id}');
-
-      _showSuccessToast(
-        'Event Created',
-        '"${newTournament.name}" has been successfully created',
-      );
-
-      await Future.delayed(const Duration(milliseconds: 1500));
+      
+      print('Saved tournament with ID: ${tournamentRef.id} with ${events.length} events');
+      _showSuccessToast('Tournament Created', '"${newTournament.name}" has been successfully created');
 
       if (mounted) {
+        await Future.delayed(const Duration(milliseconds: 1500));
         widget.onTournamentCreated?.call();
+        print('Navigating to OrganizerHomePage with userCity: ${_cityController.text.trim()}');
+        Navigator.pushReplacement(
+          context,
+          MaterialPageRoute(
+            builder: (context) => OrganizerHomePage(
+              initialIndex: 2,
+              userCity: _cityController.text.trim(),
+            ),
+          ),
+        );
       }
-    } on FirebaseException catch (e, stackTrace) {
-      debugPrint('Firestore error: ${e.code} - ${e.message}\n$stackTrace');
+    } on FirebaseException catch (e) {
+      print('Firestore error: ${e.message}');
       _showErrorToast('Creation Failed', 'Firestore error: ${e.message}');
-    } catch (e, stackTrace) {
-      debugPrint('Tournament creation failed: $e\n$stackTrace');
-      _showErrorToast('Creation Failed', 'Failed to create event: ${e.toString()}');
+    } catch (e) {
+      print('Error creating tournament: ${e.toString()}');
+      _showErrorToast('Creation Failed', 'Failed to create tournament: ${e.toString()}');
     } finally {
       if (mounted) {
         setState(() {
@@ -1060,46 +943,98 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
   }
 
   void _showSuccessToast(String title, String message) {
-    debugPrint('Showing success toast: $title - $message');
     toastification.show(
       context: context,
       type: ToastificationType.success,
-      title: Text(title),
-      description: Text(message),
+      title: Text(title, style: GoogleFonts.poppins(fontWeight: FontWeight.w600, color: Colors.white)),
+      description: Text(message, style: GoogleFonts.poppins(color: Colors.white)),
       autoCloseDuration: const Duration(seconds: 4),
-      style: ToastificationStyle.flat,
+      style: ToastificationStyle.fillColored,
       alignment: Alignment.bottomCenter,
       backgroundColor: successColor,
       foregroundColor: Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withOpacity(0.2),
+          blurRadius: 8,
+          spreadRadius: 2,
+          offset: const Offset(0, 2),
+        ),
+      ],
     );
   }
 
   void _showErrorToast(String title, String message) {
-    debugPrint('Showing error toast: $title - $message');
     toastification.show(
       context: context,
       type: ToastificationType.error,
-      title: Text(title),
-      description: Text(message),
+      title: Text(title, style: GoogleFonts.poppins(fontWeight: FontWeight.w600, color: Colors.white)),
+      description: Text(message, style: GoogleFonts.poppins(color: Colors.white)),
       autoCloseDuration: const Duration(seconds: 4),
-      style: ToastificationStyle.flat,
+      style: ToastificationStyle.fillColored,
       alignment: Alignment.bottomCenter,
       backgroundColor: errorColor,
       foregroundColor: Colors.white,
+      borderRadius: BorderRadius.circular(12),
+      boxShadow: [
+        BoxShadow(
+          color: Colors.black.withOpacity(0.2),
+          blurRadius: 8,
+          spreadRadius: 2,
+          offset: const Offset(0, 2),
+        ),
+      ],
     );
   }
 
   String? _validateCity(String? value) {
     if (value == null || value.trim().isEmpty) {
-      debugPrint('City validation failed: empty');
       return 'Enter a city';
     }
     return null;
   }
 
+  String? _validatePhoneNumber(String? value) {
+    if (value == null || value.trim().isEmpty) {
+      return 'Enter a contact number';
+    }
+    if (!RegExp(r'^\+\d{1,3}\d{6,14}$').hasMatch(value)) {
+      return 'Enter a valid phone number with country code (e.g., +1234567890)';
+    }
+    return null;
+  }
+
+  Widget _buildRequiredLabel(String text, {required bool isRequired}) {
+    return RichText(
+      text: TextSpan(
+        children: [
+          TextSpan(
+            text: text,
+            style: GoogleFonts.poppins(
+              color: textSecondary,
+              fontSize: 14,
+              fontWeight: FontWeight.w500,
+            ),
+          ),
+          if (isRequired)
+            const TextSpan(
+              text: ' *',
+              style: TextStyle(
+                color: errorColor,
+                fontWeight: FontWeight.bold,
+              ),
+            ),
+        ],
+      ),
+    );
+  }
+
   @override
   Widget build(BuildContext context) {
-    debugPrint('Building CreateTournamentPage');
+    final screenWidth = MediaQuery.of(context).size.width;
+    final isSmallScreen = screenWidth < 600;
+
     return Scaffold(
       backgroundColor: primaryColor,
       body: Container(
@@ -1116,147 +1051,273 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
             position: _slideAnimation,
             child: FadeTransition(
               opacity: _fadeAnimation,
-              child: Padding(
-                padding: const EdgeInsets.symmetric(horizontal: 20.0),
-                child: Form(
-                  key: _formKey,
-                  child: CustomScrollView(
-                    slivers: [
-                      SliverAppBar(
-                        backgroundColor: secondaryColor.withOpacity(0.9),
-                        elevation: 2,
-                        leading: IconButton(
-                          icon: const Icon(Icons.arrow_back_ios_new_rounded, color: textPrimary, size: 22),
-                          onPressed: () {
-                            debugPrint('Back button pressed');
-                            if (widget.onBackPressed != null) {
-                              widget.onBackPressed!();
-                            } else {
-                              Navigator.pop(context);
-                            }
-                          },
-                        ),
-                        title: Text(
-                          'Create Tournament',
-                          style: GoogleFonts.poppins(
-                            color: textPrimary,
-                            fontWeight: FontWeight.w600,
-                            fontSize: 22,
-                          ),
-                        ),
-                        centerTitle: true,
-                        pinned: true,
-                        expandedHeight: 60,
-                      ),
-                      SliverList(
-                        delegate: SliverChildListDelegate([
-                          const SizedBox(height: 16),
-                          _buildSectionHeader('Event Details'),
-                          const SizedBox(height: 12),
-                          _buildTextField(
-                            controller: _nameController,
-                            label: 'Tournament Name',
-                            hintText: 'e.g., Summer Badminton Championship',
-                            icon: Icons.event,
-                            validator: (value) => value == null || value.trim().isEmpty ? 'Enter a tournament name' : null,
-                          ),
-                          const SizedBox(height: 16),
-                          _buildDropdown(
-                            label: 'Tournament Type',
-                            value: _eventType,
-                            items: [
-                              'Knockout',
-                              'Round-Robin',
-                              'Double Elimination',
-                              'Group + Knockout',
-                              'Team Format',
-                              'Ladder',
-                              'Swiss Format',
-                            ],
-                            onChanged: (value) {
-                              if (mounted) {
-                                setState(() {
-                                  _eventType = value!;
-                                });
-                              }
-                            },
-                          ),
-                          const SizedBox(height: 16),
-                          _buildPlayStyleSelector(),
-                          const SizedBox(height: 24),
-                          _buildSectionHeader('Location Details'),
-                          const SizedBox(height: 12),
-                          _buildTextField(
-                            controller: _venueController,
-                            label: 'Venue Name',
-                            hintText: 'e.g., City Sports Complex',
-                            icon: Icons.location_on,
-                            validator: (value) => value == null || value.trim().isEmpty ? 'Enter a venue name' : null,
-                          ),
-                          const SizedBox(height: 16),
-                          _buildCityFieldWithLocation(),
-                          const SizedBox(height: 16),
-                          _buildTimezoneSelector(),
-                          const SizedBox(height: 24),
-                          _buildSectionHeader('Date & Time'),
-                          const SizedBox(height: 12),
-                          _buildDateTimeSelector(),
-                          const SizedBox(height: 24),
-                          _buildSectionHeader('Participation Details'),
-                          const SizedBox(height: 12),
-                          Row(
-                            children: [
-                              Expanded(
-                                child: _buildTextField(
-                                  controller: _entryFeeController,
-                                  label: 'Entry Fee (\$)',
-                                  hintText: '0 for free entry',
-                                  icon: Icons.attach_money,
-                                  keyboardType: TextInputType.number,
-                                  validator: (value) {
-                                    if (value == null || value.trim().isEmpty) {
-                                      return 'Enter an entry fee';
-                                    }
-                                    final fee = double.tryParse(value);
-                                    if (fee == null || fee < 0) {
-                                      return 'Enter a valid amount';
-                                    }
-                                    return null;
-                                  },
-                                ),
+              child: LayoutBuilder(
+                builder: (context, constraints) {
+                  final isWideScreen = constraints.maxWidth > 600;
+                  return Padding(
+                    padding: EdgeInsets.symmetric(
+                      horizontal: isWideScreen ? constraints.maxWidth * 0.1 : 16.0,
+                      vertical: 16.0,
+                    ),
+                    child: Form(
+                      key: _formKey,
+                      child: CustomScrollView(
+                        slivers: [
+                          SliverAppBar(
+                            backgroundColor: Color(0xFF6C9A8B),
+                            elevation: 4,
+                            leading: IconButton(
+                              icon: const Icon(Icons.arrow_back_ios_new_rounded, color: Colors.white, size: 24),
+                              onPressed: () {
+                                if (widget.onBackPressed != null) {
+                                  widget.onBackPressed!();
+                                } else {
+                                  Navigator.pop(context);
+                                }
+                              },
+                            ),
+                            title: Text(
+                              'Create Tournament',
+                              style: GoogleFonts.poppins(
+                                color: Colors.white,
+                                fontWeight: FontWeight.w700,
+                                fontSize: 24,
+                                letterSpacing: 0.5,
                               ),
-                              const SizedBox(width: 16),
-                              Expanded(
-                                child: _buildTextField(
-                                  controller: _maxParticipantsController,
-                                  label: 'Max Participants',
-                                  hintText: 'e.g., 32',
-                                  icon: Icons.people,
-                                  keyboardType: TextInputType.number,
-                                  validator: (value) {
-                                    if (value == null || value.trim().isEmpty) {
-                                      return 'Enter max participants';
-                                    }
-                                    final max = int.tryParse(value);
-                                    if (max == null || max <= 0) {
-                                      return 'Enter a valid number';
-                                    }
-                                    return null;
-                                  },
-                                ),
-                              ),
-                            ],
+                            ),
+                            centerTitle: true,
+                            pinned: true,
+                            expandedHeight: 80,
+                            floating: false,
+                            snap: false,
+                            stretch: true,
+                            surfaceTintColor: Colors.transparent,
                           ),
-                          const SizedBox(height: 24),
-                          _buildAdditionalSettings(),
-                          const SizedBox(height: 32),
-                          _buildCreateButton(),
-                          const SizedBox(height: 40),
-                        ]),
+                          SliverList(
+                            delegate: SliverChildListDelegate([
+                              const SizedBox(height: 24),
+                              _buildSectionContainer(
+                                title: 'Info',
+                                children: [
+                                  _buildTextField(
+                                    controller: _nameController,
+                                    label: 'Tournament Name',
+                                    hintText: 'e.g., Summer Badminton Championship',
+                                    icon: Icons.event,
+                                    isRequired: true,
+                                    validator: (value) => value == null || value.trim().isEmpty ? 'Enter a tournament name' : null,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  _buildTextField(
+                                    controller: _descriptionController,
+                                    label: 'Description',
+                                    hintText: 'Describe your tournament...',
+                                    icon: Icons.description,
+                                    maxLines: 4,
+                                    isRequired: false,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  _buildImagePickerField(isProfile: true),
+                                  const SizedBox(height: 16),
+                                  _buildImagePickerField(isProfile: false),
+                                  const SizedBox(height: 16),
+                                  _buildTextField(
+                                    controller: _contactNameController,
+                                    label: 'Contact Name',
+                                    hintText: 'e.g., John Doe',
+                                    icon: Icons.person,
+                                    isRequired: true,
+                                    validator: (value) => value == null || value.trim().isEmpty ? 'Enter a contact name' : null,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  _buildTextField(
+                                    controller: _contactNumberController,
+                                    label: 'Contact Number',
+                                    hintText: 'e.g., +1234567890',
+                                    icon: Icons.phone,
+                                    keyboardType: TextInputType.phone,
+                                    isRequired: true,
+                                    validator: _validatePhoneNumber,
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 24),
+                              _buildSectionContainer(
+                                title: 'Address',
+                                children: [
+                                  _buildTextField(
+                                    controller: _venueAddressController,
+                                    label: 'Venue Address',
+                                    hintText: 'e.g., 123 Main St',
+                                    icon: Icons.map,
+                                    maxLines: 3,
+                                    isRequired: true,
+                                    validator: (value) => value == null || value.trim().isEmpty ? 'Enter a venue address' : null,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  _buildTextField(
+                                    controller: _venueController,
+                                    label: 'Venue Name',
+                                    hintText: 'e.g., City Sports Complex',
+                                    icon: Icons.location_on,
+                                    isRequired: true,
+                                    validator: (value) => value == null || value.trim().isEmpty ? 'Enter a venue name' : null,
+                                  ),
+                                  const SizedBox(height: 16),
+                                  _buildCityFieldWithSuggestions(),
+                                  const SizedBox(height: 16),
+                                  _buildTimezoneSelector(),
+                                ],
+                              ),
+                              const SizedBox(height: 24),
+                              _buildSectionContainer(
+                                title: 'Timeline',
+                                children: [
+                                  _buildDateTimeSelector(isSmallScreen: isSmallScreen),
+                                  const SizedBox(height: 16),
+                                  GestureDetector(
+                                    onTap: () => _selectDate(context, isStartDate: false, isRegistration: true),
+                                    child: Container(
+                                      height: 56,
+                                      padding: const EdgeInsets.symmetric(horizontal: 16),
+                                      decoration: BoxDecoration(
+                                        borderRadius: BorderRadius.circular(12),
+                                        color: secondaryColor,
+                                        border: Border.all(color: borderColor, width: 1),
+                                        boxShadow: [
+                                          BoxShadow(
+                                            color: Colors.black.withOpacity(0.1),
+                                            blurRadius: 4,
+                                            offset: const Offset(0, 2),
+                                          ),
+                                        ],
+                                      ),
+                                      child: Row(
+                                        children: [
+                                          Icon(Icons.calendar_today, color: accentColor, size: 20),
+                                          const SizedBox(width: 12),
+                                          Text(
+                                            _registrationEndDate == null
+                                                ? 'Registration End Date'
+                                                : DateFormat('MMM dd, yyyy').format(_registrationEndDate!),
+                                            style: GoogleFonts.poppins(
+                                              color: _registrationEndDate == null ? textSecondary : textPrimary,
+                                              fontSize: 15,
+                                              fontWeight: FontWeight.w500,
+                                            ),
+                                          ),
+                                        ],
+                                      ),
+                                    ),
+                                  ),
+                                  if (_registrationEndDate != null && _selectedTime != null)
+                                    Padding(
+                                      padding: const EdgeInsets.only(top: 8),
+                                      child: Text(
+                                        'Registration ends at ${_selectedTime!.format(context)} on ${DateFormat('MMM dd, yyyy').format(_registrationEndDate!)}',
+                                        style: GoogleFonts.poppins(
+                                          color: textSecondary,
+                                          fontSize: 12,
+                                          fontWeight: FontWeight.w400,
+                                        ),
+                                      ),
+                                    ),
+                                ],
+                              ),
+                              const SizedBox(height: 24),
+                              _buildSectionContainer(
+                                title: 'Price',
+                                children: [
+                                  isSmallScreen
+                                      ? Column(
+                                          children: [
+                                            _buildTextField(
+                                              controller: _entryFeeController,
+                                              label: 'Entry Fee (\$)',
+                                              hintText: '0 for free entry',
+                                              icon: Icons.attach_money,
+                                              keyboardType: TextInputType.number,
+                                              isRequired: true,
+                                              validator: (value) {
+                                                if (value == null || value.trim().isEmpty) {
+                                                  return 'Enter an entry fee';
+                                                }
+                                                final fee = double.tryParse(value);
+                                                if (fee == null || fee < 0) {
+                                                  return 'Enter a valid amount';
+                                                }
+                                                return null;
+                                              },
+                                            ),
+                                            const SizedBox(height: 16),
+                                            _buildTextField(
+                                              controller: _extraFeeController,
+                                              label: 'Extra Fee (\$)',
+                                              hintText: 'Optional extra fee',
+                                              icon: Icons.add_circle,
+                                              keyboardType: TextInputType.number,
+                                              isRequired: false,
+                                            ),
+                                          ],
+                                        )
+                                      : Row(
+                                          children: [
+                                            Expanded(
+                                              child: _buildTextField(
+                                                controller: _entryFeeController,
+                                                label: 'Entry Fee (\$)',
+                                                hintText: '0 for free entry',
+                                                icon: Icons.attach_money,
+                                                keyboardType: TextInputType.number,
+                                                isRequired: true,
+                                                validator: (value) {
+                                                  if (value == null || value.trim().isEmpty) {
+                                                    return 'Enter an entry fee';
+                                                  }
+                                                  final fee = double.tryParse(value);
+                                                  if (fee == null || fee < 0) {
+                                                    return 'Enter a valid amount';
+                                                  }
+                                                  return null;
+                                                },
+                                              ),
+                                            ),
+                                            const SizedBox(width: 16),
+                                            Expanded(
+                                              child: _buildTextField(
+                                                controller: _extraFeeController,
+                                                label: 'Extra Fee (\$)',
+                                                hintText: 'Optional extra fee',
+                                                icon: Icons.add_circle,
+                                                keyboardType: TextInputType.number,
+                                                isRequired: false,
+                                              ),
+                                            ),
+                                          ],
+                                        ),
+                                  const SizedBox(height: 16),
+                                  _buildSwitchTile(
+                                    title: 'Can Pay at Venue',
+                                    subtitle: 'Participants can pay fees at the venue',
+                                    value: _canPayAtVenue,
+                                    onChanged: (value) {
+                                      setState(() {
+                                        _canPayAtVenue = value;
+                                      });
+                                    },
+                                  ),
+                                ],
+                              ),
+                              const SizedBox(height: 24),
+                              _buildNextButton(context),
+                              const SizedBox(height: 40),
+                            ]),
+                          ),
+                        ],
                       ),
-                    ],
-                  ),
-                ),
+                    ),
+                  );
+                },
               ),
             ),
           ),
@@ -1265,17 +1326,37 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     );
   }
 
-  Widget _buildSectionHeader(String title) {
-    return Padding(
-      padding: const EdgeInsets.only(left: 4.0),
-      child: Text(
-        title,
-        style: GoogleFonts.poppins(
-          color: textPrimary,
-          fontSize: 18,
-          fontWeight: FontWeight.w600,
-          letterSpacing: 0.5,
-        ),
+  Widget _buildSectionContainer({required String title, required List<Widget> children}) {
+    return Container(
+      padding: const EdgeInsets.all(16),
+      margin: const EdgeInsets.symmetric(vertical: 8),
+      decoration: BoxDecoration(
+        color: secondaryColor,
+        borderRadius: BorderRadius.circular(16),
+        boxShadow: [
+          BoxShadow(
+            color: Colors.black.withOpacity(0.1),
+            blurRadius: 10,
+            spreadRadius: 2,
+            offset: const Offset(0, 4),
+          ),
+        ],
+      ),
+      child: Column(
+        crossAxisAlignment: CrossAxisAlignment.start,
+        children: [
+          Text(
+            title,
+            style: GoogleFonts.poppins(
+              color: textPrimary,
+              fontSize: 18,
+              fontWeight: FontWeight.w700,
+              letterSpacing: 0.5,
+            ),
+          ),
+          const SizedBox(height: 12),
+          ...children,
+        ],
       ),
     );
   }
@@ -1290,98 +1371,150 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     int maxLines = 1,
     Widget? suffix,
     ValueChanged<String>? onChanged,
+    required bool isRequired,
   }) {
-    return Container(
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        boxShadow: [
-          BoxShadow(
-            color: Colors.black.withOpacity(0.1),
-            blurRadius: 8,
-            spreadRadius: 1,
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildRequiredLabel(label, isRequired: isRequired),
+        const SizedBox(height: 8),
+        Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.05),
+                blurRadius: 6,
+                spreadRadius: 1,
+                offset: const Offset(0, 2),
+              ),
+            ],
           ),
-        ],
-      ),
-      child: TextFormField(
-        controller: controller,
-        style: GoogleFonts.poppins(
-          color: textPrimary,
-          fontSize: 15,
-          fontWeight: FontWeight.w500,
+          child: TextFormField(
+            controller: controller,
+            style: GoogleFonts.poppins(
+              color: textPrimary,
+              fontSize: 15,
+              fontWeight: FontWeight.w500,
+            ),
+            cursorColor: accentColor,
+            keyboardType: keyboardType,
+            maxLines: maxLines,
+            onChanged: onChanged,
+            decoration: InputDecoration(
+              hintText: hintText,
+              hintStyle: GoogleFonts.poppins(
+                color: textSecondary.withOpacity(0.6),
+                fontSize: 14,
+              ),
+              prefixIcon: icon != null ? Icon(icon, color: accentColor, size: 20) : null,
+              suffixIcon: suffix,
+              filled: true,
+              fillColor: secondaryColor,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(color: borderColor, width: 1),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(color: accentColor, width: 1.5),
+              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+            ),
+            validator: validator,
+          ),
         ),
-        cursorColor: accentColor,
-        keyboardType: keyboardType,
-        maxLines: maxLines,
-        onChanged: onChanged,
-        decoration: InputDecoration(
-          labelText: label,
-          hintText: hintText,
-          hintStyle: GoogleFonts.poppins(
-            color: textSecondary,
-            fontSize: 14,
-          ),
-          labelStyle: GoogleFonts.poppins(
-            color: textSecondary,
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-          ),
-          prefixIcon: icon != null ? Icon(icon, color: accentColor, size: 20) : null,
-          suffixIcon: suffix,
-          filled: true,
-          fillColor: secondaryColor,
-          border: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: BorderSide.none,
-          ),
-          enabledBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: borderColor, width: 1),
-          ),
-          focusedBorder: OutlineInputBorder(
-            borderRadius: BorderRadius.circular(12),
-            borderSide: const BorderSide(color: accentColor, width: 1.5),
-          ),
-          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-        ),
-        validator: validator,
-      ),
+      ],
     );
   }
 
-  Widget _buildCityFieldWithLocation() {
-    return Stack(
+  Widget _buildCityFieldWithSuggestions() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        _buildTextField(
-          controller: _cityController,
-          label: 'City',
-          hintText: 'Select your city',
-          icon: Icons.location_city,
-          validator: _validateCity,
-          onChanged: _debounceCityValidation,
-          suffix: _isValidatingCity
-              ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    valueColor: AlwaysStoppedAnimation<Color>(accentColor),
-                  ),
-                )
-              : Icon(
-                  _isCityValid ? Icons.check_circle : Icons.error,
-                  color: _isCityValid ? successColor : errorColor,
-                  size: 20,
-                ),
+        _buildRequiredLabel('City', isRequired: true),
+        const SizedBox(height: 8),
+        Container(
+          decoration: BoxDecoration(
+            borderRadius: BorderRadius.circular(12),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.05),
+                blurRadius: 6,
+                spreadRadius: 1,
+                offset: const Offset(0, 2),
+              ),
+            ],
+          ),
+          child: TextFormField(
+            controller: _cityController,
+            focusNode: _cityFocusNode,
+            style: GoogleFonts.poppins(
+              color: textPrimary,
+              fontSize: 15,
+              fontWeight: FontWeight.w500,
+            ),
+            cursorColor: accentColor,
+            onChanged: _debounceCityValidation,
+            decoration: InputDecoration(
+              hintText: 'Select your city',
+              hintStyle: GoogleFonts.poppins(
+                color: textSecondary.withOpacity(0.6),
+                fontSize: 14,
+              ),
+              prefixIcon: Icon(Icons.location_city, color: accentColor, size: 20),
+              suffixIcon: _isValidatingCity || _isFetchingSuggestions
+                  ? const SizedBox(
+                      width: 20,
+                      height: 20,
+                      child: CircularProgressIndicator(
+                        strokeWidth: 2,
+                        valueColor: AlwaysStoppedAnimation<Color>(accentColor),
+                      ),
+                    )
+                  : Icon(
+                      _isCityValid ? Icons.check_circle : Icons.error,
+                      color: _isCityValid ? successColor : errorColor,
+                      size: 20,
+                    ),
+              filled: true,
+              fillColor: secondaryColor,
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: BorderSide.none,
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(color: borderColor, width: 1),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(12),
+                borderSide: const BorderSide(color: accentColor, width: 1.5),
+              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+            ),
+            validator: _validateCity,
+          ),
         ),
         if (!_isFetchingLocation)
-          Positioned(
-            right: 20,
-            top: 4,
-            child: IconButton(
+          Align(
+            alignment: Alignment.centerRight,
+            child: TextButton.icon(
               icon: Icon(
                 Icons.my_location,
                 color: _fetchedCity != null ? accentColor : textSecondary,
-                size: 20,
+                size: 16,
+              ),
+              label: Text(
+                'Use current location',
+                style: GoogleFonts.poppins(
+                  color: _fetchedCity != null ? accentColor : textSecondary,
+                  fontSize: 12,
+                ),
               ),
               onPressed: _fetchedCity != null
                   ? () async {
@@ -1391,7 +1524,6 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
                           _isValidatingCity = true;
                         });
                         await _validateCityWithGeocoding(_fetchedCity!);
-                        debugPrint('Set city to fetched: $_fetchedCity');
                       }
                     }
                   : null,
@@ -1405,267 +1537,200 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     return Column(
       crossAxisAlignment: CrossAxisAlignment.start,
       children: [
-        Text(
-          'Timezone',
-          style: GoogleFonts.poppins(
-            color: textSecondary,
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
+        _buildRequiredLabel('Timezone', isRequired: false),
+        const SizedBox(height: 8),
+        CompositedTransformTarget(
+          link: _timezoneLayerLink,
+          child: GestureDetector(
+            onTap: () => _toggleTimezoneDropdown(),
+            child: Container(
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: secondaryColor,
+                border: Border.all(color: borderColor, width: 1),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Text(
+                      _selectedTimezone,
+                      style: GoogleFonts.poppins(
+                        color: textPrimary,
+                        fontSize: 15,
+                        fontWeight: FontWeight.w500,
+                      ),
+                    ),
+                  ),
+                  Icon(
+                    _showTimezoneDropdown ? Icons.arrow_drop_up : Icons.arrow_drop_down,
+                    color: textSecondary,
+                    size: 24,
+                  ),
+                ],
+              ),
+            ),
           ),
         ),
-        const SizedBox(height: 8),
-        GestureDetector(
-          onTap: () => _showTimezoneDialog(context),
+      ],
+    );
+  }
+
+  void _toggleTimezoneDropdown() {
+    if (_showTimezoneDropdown) {
+      _hideTimezoneDropdown();
+    } else {
+      _showTimezoneDropdown = true;
+      _showTimezoneOverlay();
+    }
+  }
+
+  void _showTimezoneOverlay() {
+    final renderBox = context.findRenderObject() as RenderBox;
+    final size = renderBox.size;
+    final offset = renderBox.localToGlobal(Offset.zero);
+
+    _timezoneOverlayEntry = OverlayEntry(
+      builder: (context) => Positioned(
+        left: offset.dx,
+        top: offset.dy + size.height + 4,
+        width: size.width,
+        child: Material(
+          elevation: 4,
+          borderRadius: BorderRadius.circular(8),
           child: Container(
+            constraints: const BoxConstraints(maxHeight: 200),
             decoration: BoxDecoration(
-              borderRadius: BorderRadius.circular(12),
               color: secondaryColor,
-              border: Border.all(color: borderColor, width: 1),
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.1),
+                  blurRadius: 8,
+                  offset: const Offset(0, 4),
+                ),
+              ],
             ),
-            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-            child: Row(
-              children: [
-                Expanded(
-                  child: Text(
-                    _selectedTimezone == 'Asia/Kolkata'
-                        ? 'IST ($_selectedTimezone)'
-                        : _selectedTimezone,
+            child: ListView.builder(
+              shrinkWrap: true,
+              padding: EdgeInsets.zero,
+              itemCount: _allTimezones.length,
+              itemBuilder: (context, index) {
+                final timezone = _allTimezones[index];
+                return ListTile(
+                  title: Text(
+                    timezone,
                     style: GoogleFonts.poppins(
                       color: textPrimary,
-                      fontSize: 15,
+                      fontSize: 14,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
-                ),
-                Icon(Icons.arrow_drop_down, color: accentColor),
-              ],
+                  onTap: () {
+                    setState(() {
+                      _selectedTimezone = timezone;
+                    });
+                    _hideTimezoneDropdown();
+                  },
+                );
+              },
             ),
           ),
         ),
-      ],
+      ),
     );
+
+    Overlay.of(context).insert(_timezoneOverlayEntry!);
   }
 
-  Future<void> _showTimezoneDialog(BuildContext context) async {
-    String searchQuery = '';
-    final controller = TextEditingController();
+  void _hideTimezoneDropdown() {
+    _timezoneOverlayEntry?.remove();
+    _timezoneOverlayEntry = null;
+    setState(() {
+      _showTimezoneDropdown = false;
+    });
+  }
 
-    await showDialog(
-      context: context,
-      builder: (context) {
-        return StatefulBuilder(
-          builder: (context, setDialogState) {
-            final filteredTimezones = _allTimezones
-                .where((timezone) => timezone.toLowerCase().contains(searchQuery.toLowerCase()))
-                .toList();
-
-            return AlertDialog(
-              backgroundColor: secondaryColor,
-              title: Text(
-                'Select Timezone',
-                style: GoogleFonts.poppins(
-                  color: textPrimary,
-                  fontWeight: FontWeight.w600,
-                ),
-              ),
-              content: SizedBox(
-                width: double.maxFinite,
-                child: Column(
-                  mainAxisSize: MainAxisSize.min,
-                  children: [
-                    TextField(
-                      controller: controller,
-                      decoration: InputDecoration(
-                        hintText: 'Search timezones...',
-                        hintStyle: GoogleFonts.poppins(color: textSecondary),
-                        prefixIcon: Icon(Icons.search, color: accentColor),
-                        border: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: BorderSide(color: borderColor),
-                        ),
-                        enabledBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: BorderSide(color: borderColor),
-                        ),
-                        focusedBorder: OutlineInputBorder(
-                          borderRadius: BorderRadius.circular(8),
-                          borderSide: BorderSide(color: accentColor),
-                        ),
-                      ),
-                      onChanged: (value) {
-                        setDialogState(() {
-                          searchQuery = value;
-                        });
-                      },
-                    ),
-                    const SizedBox(height: 16),
-                    SizedBox(
-                      height: 300,
-                      child: ListView.builder(
-                        itemCount: filteredTimezones.length,
-                        itemBuilder: (context, index) {
-                          final timezone = filteredTimezones[index];
-                          return ListTile(
-                            title: Text(
-                              timezone == 'Asia/Kolkata' ? 'IST ($timezone)' : timezone,
-                              style: GoogleFonts.poppins(
-                                color: textPrimary,
-                                fontSize: 15,
-                              ),
-                            ),
-                            onTap: () {
-                              setState(() {
-                                _selectedTimezone = timezone;
-                              });
-                              Navigator.pop(context);
-                            },
-                          );
-                        },
-                      ),
+  Widget _buildImagePickerField({required bool isProfile}) {
+    final imageFile = isProfile ? _profileImage : _sponsorImage;
+    
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        _buildRequiredLabel(isProfile ? 'Profile Picture' : 'Sponsor Picture', isRequired: false),
+        const SizedBox(height: 8),
+        Stack(
+          children: [
+            GestureDetector(
+              onTap: () => _pickImage(isProfile),
+              child: Container(
+                height: 100,
+                width: double.infinity,
+                decoration: BoxDecoration(
+                  color: secondaryColor,
+                  borderRadius: BorderRadius.circular(12),
+                  border: Border.all(color: borderColor, width: 1),
+                  boxShadow: [
+                    BoxShadow(
+                      color: Colors.black.withOpacity(0.1),
+                      blurRadius: 4,
+                      offset: const Offset(0, 2),
                     ),
                   ],
                 ),
+                child: imageFile == null
+                    ? Center(
+                        child: Icon(
+                          Icons.add_photo_alternate,
+                          color: textSecondary,
+                          size: 40,
+                        ),
+                      )
+                    : ClipRRect(
+                        borderRadius: BorderRadius.circular(12),
+                        child: Image.file(
+                          imageFile,
+                          fit: BoxFit.cover,
+                          width: double.infinity,
+                          height: double.infinity,
+                        ),
+                      ),
               ),
-              actions: [
-                TextButton(
-                  onPressed: () => Navigator.pop(context),
-                  child: Text(
-                    'Cancel',
-                    style: GoogleFonts.poppins(color: accentColor),
-                  ),
-                ),
-              ],
-            );
-          },
-        );
-      },
-    );
-  }
-
-  Widget _buildPlayStyleSelector() {
-    const options = [
-      "Men's Singles",
-      "Women's Singles",
-      "Men's Doubles",
-      "Women's Doubles",
-      'Mixed Doubles',
-    ];
-
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          'Play Style',
-          style: GoogleFonts.poppins(
-            color: textSecondary,
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-        const SizedBox(height: 8),
-        SizedBox(
-          height: 48,
-          child: ListView.separated(
-            scrollDirection: Axis.horizontal,
-            itemCount: options.length,
-            separatorBuilder: (context, index) => const SizedBox(width: 8),
-            itemBuilder: (context, index) {
-              final option = options[index];
-              return ChoiceChip(
-                label: Text(
-                  option,
-                  style: GoogleFonts.poppins(
-                    fontSize: 13,
-                    fontWeight: FontWeight.w500,
-                    color: _playStyle == option ? textPrimary : textSecondary,
-                  ),
-                ),
-                selected: _playStyle == option,
-                onSelected: (selected) {
-                  if (mounted) {
-                    setState(() {
-                      _playStyle = option;
-                    });
-                  }
-                  debugPrint('Selected play style: $option');
-                },
-                backgroundColor: secondaryColor,
-                selectedColor: highlightColor,
-                side: BorderSide(
-                  color: _playStyle == option ? accentColor : borderColor,
-                  width: 1,
-                ),
-                shape: RoundedRectangleBorder(
-                  borderRadius: BorderRadius.circular(8),
-                ),
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                showCheckmark: false,
-              );
-            },
-          ),
-        ),
-      ],
-    );
-  }
-
-  Widget _buildDropdown({
-    required String label,
-    required String value,
-    required List<String> items,
-    required ValueChanged<String?> onChanged,
-  }) {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        Text(
-          label,
-          style: GoogleFonts.poppins(
-            color: textSecondary,
-            fontSize: 14,
-            fontWeight: FontWeight.w500,
-          ),
-        ),
-        const SizedBox(height: 8),
-        Container(
-          decoration: BoxDecoration(
-            borderRadius: BorderRadius.circular(12),
-            color: secondaryColor,
-            border: Border.all(color: borderColor, width: 1),
-          ),
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: DropdownButtonFormField<String>(
-            value: value,
-            items: items.map((item) {
-              return DropdownMenuItem(
-                value: item,
-                child: Text(
-                  item,
-                  style: GoogleFonts.poppins(
-                    color: textPrimary,
-                    fontSize: 15,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-              );
-            }).toList(),
-            onChanged: onChanged,
-            decoration: const InputDecoration(
-              border: InputBorder.none,
-              enabledBorder: InputBorder.none,
-              focusedBorder: InputBorder.none,
-              isDense: true,
             ),
-            dropdownColor: secondaryColor,
-            icon: Icon(Icons.arrow_drop_down, color: accentColor),
-            style: GoogleFonts.poppins(color: textPrimary, fontSize: 15),
-            borderRadius: BorderRadius.circular(12),
-          ),
+            if (imageFile != null)
+              Positioned(
+                top: 4,
+                right: 4,
+                child: GestureDetector(
+                  onTap: () => _discardImage(isProfile),
+                  child: Container(
+                    padding: const EdgeInsets.all(4),
+                    decoration: BoxDecoration(
+                      color: errorColor.withOpacity(0.8),
+                      shape: BoxShape.circle,
+                    ),
+                    child: Icon(
+                      Icons.close,
+                      color: Colors.white,
+                      size: 16,
+                    ),
+                  ),
+                ),
+              ),
+          ],
         ),
       ],
     );
   }
 
-  Widget _buildDateTimeSelector() {
+  Widget _buildDateTimeSelector({required bool isSmallScreen}) {
     final timeZone = tz.getLocation(_selectedTimezone);
     final startDateLocal = _selectedDate != null ? tz.TZDateTime.from(_selectedDate!, timeZone) : null;
     final startTime = _selectedTime ?? (startDateLocal != null
@@ -1673,180 +1738,259 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
         : null);
     final endDateLocal = _selectedEndDate != null ? tz.TZDateTime.from(_selectedEndDate!, timeZone) : null;
 
-    return Column(
-      children: [
-        Row(
-          children: [
-            Expanded(
-              child: GestureDetector(
-                onTap: () => _selectDate(context),
-                child: Container(
-                  height: 56,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
-                    color: secondaryColor,
-                    border: Border.all(color: borderColor, width: 1),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(Icons.calendar_today, color: accentColor, size: 20),
-                      const SizedBox(width: 12),
-                      Text(
-                        startDateLocal == null
-                            ? 'Start Date'
-                            : DateFormat('MMM dd, yyyy').format(startDateLocal),
-                        style: GoogleFonts.poppins(
-                          color: startDateLocal == null ? textSecondary : textPrimary,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            const SizedBox(width: 16),
-            Expanded(
-              child: GestureDetector(
-                onTap: () => _selectTime(context),
-                child: Container(
-                  height: 56,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
-                    color: secondaryColor,
-                    border: Border.all(color: borderColor, width: 1),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(Icons.access_time, color: accentColor, size: 20),
-                      const SizedBox(width: 12),
-                      Text(
-                        startTime == null ? 'Start Time' : startTime.format(context),
-                        style: GoogleFonts.poppins(
-                          color: startTime == null ? textSecondary : textPrimary,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-          ],
-        ),
-        const SizedBox(height: 16),
-        Row(
-          children: [
-            Expanded(
-              child: GestureDetector(
-                onTap: () => _selectEndDate(context),
-                child: Container(
-                  height: 56,
-                  padding: const EdgeInsets.symmetric(horizontal: 16),
-                  decoration: BoxDecoration(
-                    borderRadius: BorderRadius.circular(12),
-                    color: secondaryColor,
-                    border: Border.all(color: borderColor, width: 1),
-                  ),
-                  child: Row(
-                    children: [
-                      Icon(Icons.calendar_today, color: accentColor, size: 20),
-                      const SizedBox(width: 12),
-                      Text(
-                        endDateLocal == null
-                            ? 'End Date'
-                            : DateFormat('MMM dd, yyyy').format(endDateLocal),
-                        style: GoogleFonts.poppins(
-                          color: endDateLocal == null ? textSecondary : textPrimary,
-                          fontSize: 15,
-                          fontWeight: FontWeight.w500,
-                        ),
-                      ),
-                    ],
-                  ),
-                ),
-              ),
-            ),
-            const Expanded(child: SizedBox()),
-          ],
-        ),
-        if (_selectedDate != null && _selectedTime != null)
-          Padding(
-            padding: const EdgeInsets.only(top: 8),
-            child: Text(
-              'Time in ${_selectedTimezone == 'Asia/Kolkata' ? 'IST' : _selectedTimezone}',
-              style: GoogleFonts.poppins(
-                color: textSecondary,
-                fontSize: 12,
-                fontWeight: FontWeight.w400,
-              ),
-            ),
-          ),
-      ],
-    );
-  }
-
-  Widget _buildAdditionalSettings() {
-    return Theme(
-      data: Theme.of(context).copyWith(dividerColor: Colors.transparent),
-      child: ExpansionTile(
-        title: Text(
-          'Additional Settings',
-          style: GoogleFonts.poppins(
-            color: textPrimary,
-            fontSize: 16,
-            fontWeight: FontWeight.w600,
-          ),
-        ),
-        initiallyExpanded: true,
-        collapsedBackgroundColor: Colors.transparent,
-        backgroundColor: Colors.transparent,
-        iconColor: accentColor,
-        collapsedIconColor: textSecondary,
+    if (isSmallScreen) {
+      return Column(
         children: [
-          const SizedBox(height: 8),
-          _buildTextField(
-            controller: _rulesController,
-            label: 'Rules & Guidelines',
-            hintText: 'Describe the tournament rules and requirements...',
-            icon: Icons.rule,
-            maxLines: 4,
-            validator: (value) => value == null || value.trim().isEmpty ? 'Please provide some rules' : null,
+          GestureDetector(
+            onTap: () => _selectDate(context, isStartDate: true),
+            child: Container(
+              height: 56,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: secondaryColor,
+                border: Border.all(color: borderColor, width: 1),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.calendar_today, color: accentColor, size: 20),
+                  const SizedBox(width: 12),
+                  Text(
+                    startDateLocal == null
+                        ? 'Start Date *'
+                        : DateFormat('MMM dd, yyyy').format(startDateLocal),
+                    style: GoogleFonts.poppins(
+                      color: startDateLocal == null ? textSecondary : textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
           const SizedBox(height: 16),
-          _buildSwitchTile(
-            title: 'Bring Own Equipment',
-            subtitle: 'Participants must bring their own equipment',
-            value: _bringOwnEquipment,
-            onChanged: (value) {
-              if (mounted) {
-                setState(() {
-                  _bringOwnEquipment = value;
-                });
-              }
-              debugPrint('Bring own equipment: $value');
-            },
+          GestureDetector(
+            onTap: () => _selectTime(context),
+            child: Container(
+              height: 56,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: secondaryColor,
+                border: Border.all(color: borderColor, width: 1),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.access_time, color: accentColor, size: 20),
+                  const SizedBox(width: 12),
+                  Text(
+                    startTime == null ? 'Start Time *' : startTime.format(context),
+                    style: GoogleFonts.poppins(
+                      color: startTime == null ? textSecondary : textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
-          _buildSwitchTile(
-            title: 'Cost Shared',
-            subtitle: 'Costs are shared among participants',
-            value: _costShared,
-            onChanged: (value) {
-              if (mounted) {
-                setState(() {
-                  _costShared = value;
-                });
-              }
-              debugPrint('Cost shared: $value');
-            },
+          const SizedBox(height: 16),
+          GestureDetector(
+            onTap: () => _selectDate(context, isStartDate: false),
+            child: Container(
+              height: 56,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: secondaryColor,
+                border: Border.all(color: borderColor, width: 1),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.calendar_today, color: accentColor, size: 20),
+                  const SizedBox(width: 12),
+                  Text(
+                    endDateLocal == null
+                        ? 'End Date *'
+                        : DateFormat('MMM dd, yyyy').format(endDateLocal),
+                    style: GoogleFonts.poppins(
+                      color: endDateLocal == null ? textSecondary : textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
           ),
+          if (_selectedDate != null && _selectedTime != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'Time in ${_selectedTimezone == 'Asia/Kolkata' ? 'IST' : _selectedTimezone}',
+                style: GoogleFonts.poppins(
+                  color: textSecondary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+            ),
         ],
-      ),
-    );
+      );
+    } else {
+      return Column(
+        children: [
+          Row(
+            children: [
+              Expanded(
+                child: GestureDetector(
+                  onTap: () => _selectDate(context, isStartDate: true),
+                  child: Container(
+                    height: 56,
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      color: secondaryColor,
+                      border: Border.all(color: borderColor, width: 1),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.1),
+                          blurRadius: 4,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.calendar_today, color: accentColor, size: 20),
+                        const SizedBox(width: 12),
+                        Text(
+                          startDateLocal == null
+                              ? 'Start Date *'
+                              : DateFormat('MMM dd, yyyy').format(startDateLocal),
+                          style: GoogleFonts.poppins(
+                            color: startDateLocal == null ? textSecondary : textPrimary,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+              const SizedBox(width: 16),
+              Expanded(
+                child: GestureDetector(
+                  onTap: () => _selectTime(context),
+                  child: Container(
+                    height: 56,
+                    padding: const EdgeInsets.symmetric(horizontal: 16),
+                    decoration: BoxDecoration(
+                      borderRadius: BorderRadius.circular(12),
+                      color: secondaryColor,
+                      border: Border.all(color: borderColor, width: 1),
+                      boxShadow: [
+                        BoxShadow(
+                          color: Colors.black.withOpacity(0.1),
+                          blurRadius: 4,
+                          offset: const Offset(0, 2),
+                        ),
+                      ],
+                    ),
+                    child: Row(
+                      children: [
+                        Icon(Icons.access_time, color: accentColor, size: 20),
+                        const SizedBox(width: 12),
+                        Text(
+                          startTime == null ? 'Start Time *' : startTime.format(context),
+                          style: GoogleFonts.poppins(
+                            color: startTime == null ? textSecondary : textPrimary,
+                            fontSize: 15,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ),
+                ),
+              ),
+            ],
+          ),
+          const SizedBox(height: 16),
+          GestureDetector(
+            onTap: () => _selectDate(context, isStartDate: false),
+            child: Container(
+              height: 56,
+              padding: const EdgeInsets.symmetric(horizontal: 16),
+              decoration: BoxDecoration(
+                borderRadius: BorderRadius.circular(12),
+                color: secondaryColor,
+                border: Border.all(color: borderColor, width: 1),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.1),
+                    blurRadius: 4,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.calendar_today, color: accentColor, size: 20),
+                  const SizedBox(width: 12),
+                  Text(
+                    endDateLocal == null
+                        ? 'End Date *'
+                        : DateFormat('MMM dd, yyyy').format(endDateLocal),
+                    style: GoogleFonts.poppins(
+                      color: endDateLocal == null ? textSecondary : textPrimary,
+                      fontSize: 15,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ),
+          if (_selectedDate != null && _selectedTime != null)
+            Padding(
+              padding: const EdgeInsets.only(top: 8),
+              child: Text(
+                'Time in ${_selectedTimezone == 'Asia/Kolkata' ? 'IST' : _selectedTimezone}',
+                style: GoogleFonts.poppins(
+                  color: textSecondary,
+                  fontSize: 12,
+                  fontWeight: FontWeight.w400,
+                ),
+              ),
+            ),
+        ],
+      );
+    }
   }
 
   Widget _buildSwitchTile({
@@ -1855,57 +1999,35 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     required bool value,
     required ValueChanged<bool> onChanged,
   }) {
-    return Container(
-      margin: const EdgeInsets.only(bottom: 12),
-      padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 8),
-      decoration: BoxDecoration(
-        borderRadius: BorderRadius.circular(12),
-        color: secondaryColor,
-        border: Border.all(color: borderColor, width: 1),
+    return SwitchListTile(
+      title: Text(
+        title,
+        style: GoogleFonts.poppins(
+          color: textPrimary,
+          fontSize: 16,
+          fontWeight: FontWeight.w600,
+        ),
       ),
-      child: Row(
-        children: [
-          Expanded(
-            child: Column(
-              crossAxisAlignment: CrossAxisAlignment.start,
-              children: [
-                Text(
-                  title,
-                  style: GoogleFonts.poppins(
-                    color: textPrimary,
-                    fontSize: 14,
-                    fontWeight: FontWeight.w500,
-                  ),
-                ),
-                const SizedBox(height: 2),
-                Text(
-                  subtitle,
-                  style: GoogleFonts.poppins(
-                    color: textSecondary,
-                    fontSize: 12,
-                  ),
-                ),
-              ],
-            ),
-          ),
-          Switch(
-            value: value,
-            onChanged: onChanged,
-            activeColor: accentColor,
-            inactiveTrackColor: borderColor,
-            activeTrackColor: accentColor.withOpacity(0.3),
-          ),
-        ],
+      subtitle: Text(
+        subtitle,
+        style: GoogleFonts.poppins(
+          color: textSecondary,
+          fontSize: 14,
+        ),
       ),
+      value: value,
+      activeColor: accentColor,
+      onChanged: onChanged,
+      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
     );
   }
 
-  Widget _buildCreateButton() {
+  Widget _buildNextButton(BuildContext context) {
     return SizedBox(
       width: double.infinity,
       height: 56,
       child: ElevatedButton(
-        onPressed: _isLoading ? null : _createTournament,
+        onPressed: _isLoading ? null : () => _createTournament(context),
         style: ElevatedButton.styleFrom(
           backgroundColor: accentColor,
           shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
@@ -1920,7 +2042,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
                 child: CircularProgressIndicator(strokeWidth: 2, color: Colors.white),
               )
             : Text(
-                'Create Tournament',
+                'Next',
                 style: GoogleFonts.poppins(
                   color: Colors.white,
                   fontWeight: FontWeight.w600,

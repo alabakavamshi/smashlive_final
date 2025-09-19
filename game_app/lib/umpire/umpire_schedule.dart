@@ -24,10 +24,20 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
   String? _errorMessage;
   bool _filterMatchesOnly = false;
 
+  final Color _primaryColor = const Color(0xFF6C9A8B);
+  final Color _accentColor = const Color(0xFFF4A261);
+  final Color _textColor = const Color(0xFF333333);
+  final Color _secondaryText = const Color(0xFF757575);
+  final Color _successColor = const Color(0xFF2A9D8F);
+  final Color _moodColor = const Color(0xFFE9C46A);
+  final Color _coolBlue = const Color(0xFFA8DADC);
+  final Color _errorColor = const Color(0xFFE76F51);
+  final Color _backgroundColor = const Color(0xFFFDFCFB);
+
   @override
   void initState() {
     super.initState();
-    tz.initializeTimeZones(); // Initialize timezone data
+    tz.initializeTimeZones();
     _selectedDate = DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day);
     _fetchMatches();
   }
@@ -43,70 +53,85 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
     });
 
     try {
-      final tournamentsSnapshot = await FirebaseFirestore.instance
-          .collection('tournaments')
-          .where('status', whereIn: ['open', 'ongoing'])
-          .orderBy('startDate', descending: false)
+      // Query all matches assigned to this umpire using collectionGroup
+      final matchesSnapshot = await FirebaseFirestore.instance
+          .collectionGroup('matches')
+          .where('umpire.email', isEqualTo: widget.userEmail.toLowerCase().trim())
           .get();
+
+      debugPrint('Found ${matchesSnapshot.docs.length} matches for umpire schedule');
 
       final List<Map<String, dynamic>> allMatches = [];
       final Set<DateTime> matchDates = {};
 
-      for (var tournamentDoc in tournamentsSnapshot.docs) {
-        final tournamentData = tournamentDoc.data();
-        final matches = List<Map<String, dynamic>>.from(tournamentData['matches'] ?? []);
-        final tournamentTimezone = tournamentData['timezone']?.toString() ?? 'Asia/Kolkata';
-        tz.Location tzLocation;
+      for (var matchDoc in matchesSnapshot.docs) {
         try {
-          tzLocation = tz.getLocation(tournamentTimezone);
-        } catch (e) {
-          debugPrint('Invalid timezone for tournament ${tournamentDoc.id}: $tournamentTimezone, defaulting to Asia/Kolkata');
-          tzLocation = tz.getLocation('Asia/Kolkata');
-        }
+          final matchData = matchDoc.data();
+          final path = matchDoc.reference.path;
+          final tournamentId = path.split('/')[1]; // Extract tournament ID from path
 
-        for (var match in matches) {
-          try {
-            final matchUmpire = match['umpire'] as Map<String, dynamic>?;
-            if (matchUmpire == null) continue;
+          // Load tournament data
+          final tournamentDoc = await FirebaseFirestore.instance
+              .collection('tournaments')
+              .doc(tournamentId)
+              .get();
 
-            final matchUmpireEmail = (matchUmpire['email'] as String?)?.toLowerCase().trim();
-            if (matchUmpireEmail != widget.userEmail.toLowerCase().trim()) continue;
-
-            final matchStartTime = match['startTime'] as Timestamp?;
-            if (matchStartTime == null) continue;
-
-            final matchTime = matchStartTime.toDate();
-            final matchTimeInTz = tz.TZDateTime.from(matchTime, tzLocation);
-            final matchDateOnly = DateTime(matchTimeInTz.year, matchTimeInTz.month, matchTimeInTz.day);
-
-            matchDates.add(matchDateOnly);
-
-            if (matchDateOnly.isAtSameMomentAs(DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day))) {
-              allMatches.add({
-                'matchId': match['matchId']?.toString() ?? '',
-                'tournamentId': tournamentDoc.id,
-                'tournamentName': tournamentData['name']?.toString() ?? 'Unnamed Tournament',
-                'player1': match['player1']?.toString() ?? 'TBD',
-                'player2': match['player2']?.toString() ?? 'TBD',
-                'startTime': matchTime, // Keep for compatibility
-                'startTimeInTz': matchTimeInTz,
-                'timezone': tournamentTimezone,
-                'status': match['completed'] == true
-                    ? 'completed'
-                    : (match['liveScores']?['isLive'] == true ? 'ongoing' : 'scheduled'),
-                'location': (tournamentData['venue']?.isNotEmpty == true && tournamentData['city']?.isNotEmpty == true)
-                    ? '${tournamentData['venue']}, ${tournamentData['city']}'
-                    : tournamentData['city']?.isNotEmpty == true
-                        ? tournamentData['city']
-                        : 'Unknown',
-                'match': match,
-                'isDoubles': (tournamentData['gameFormat'] ?? '').toLowerCase().contains('doubles'),
-                'matchIndex': matches.indexOf(match),
-              });
-            }
-          } catch (e) {
-            debugPrint('Error processing match: $e');
+          if (!tournamentDoc.exists) {
+            debugPrint('Tournament $tournamentId not found');
+            continue;
           }
+
+          final tournamentData = tournamentDoc.data()!;
+          final tournamentTimezone = tournamentData['timezone']?.toString() ?? 'Asia/Kolkata';
+          
+          tz.Location tzLocation;
+          try {
+            tzLocation = tz.getLocation(tournamentTimezone);
+          } catch (e) {
+            debugPrint('Invalid timezone $tournamentTimezone, defaulting to Asia/Kolkata');
+            tzLocation = tz.getLocation('Asia/Kolkata');
+          }
+
+          final matchStartTime = matchData['startTime'] as Timestamp?;
+          if (matchStartTime == null) continue;
+
+          final matchTime = matchStartTime.toDate();
+          final matchTimeInTz = tz.TZDateTime.from(matchTime, tzLocation);
+          final matchDateOnly = DateTime(matchTimeInTz.year, matchTimeInTz.month, matchTimeInTz.day);
+
+          matchDates.add(matchDateOnly);
+
+          // Check if this match is for the selected date
+          if (matchDateOnly.isAtSameMomentAs(DateTime(_selectedDate.year, _selectedDate.month, _selectedDate.day))) {
+            final isDoubles = (matchData['matchType'] ?? '').toString().toLowerCase().contains('doubles');
+            
+            allMatches.add({
+              'matchId': matchDoc.id,
+              'tournamentId': tournamentId,
+              'tournamentName': tournamentData['name']?.toString() ?? 'Unnamed Tournament',
+              'player1': isDoubles 
+                  ? (matchData['team1'] as List<dynamic>?)?.join(' & ') ?? 'Team 1'
+                  : matchData['player1']?.toString() ?? 'TBD',
+              'player2': isDoubles
+                  ? (matchData['team2'] as List<dynamic>?)?.join(' & ') ?? 'Team 2' 
+                  : matchData['player2']?.toString() ?? 'TBD',
+              'startTime': matchTime,
+              'startTimeInTz': matchTimeInTz,
+              'timezone': tournamentTimezone,
+              'status': matchData['completed'] == true
+                  ? 'completed'
+                  : (matchData['liveScores']?['isLive'] == true ? 'ongoing' : 'scheduled'),
+              'location': _buildLocationString(tournamentData),
+              'match': matchData,
+              'isDoubles': isDoubles,
+              'court': matchData['court'],
+              'timeSlot': matchData['timeSlot'],
+              'eventId': matchData['eventId'],
+              'round': matchData['round'] ?? 1,
+            });
+          }
+        } catch (e) {
+          debugPrint('Error processing match ${matchDoc.id}: $e');
         }
       }
 
@@ -128,6 +153,19 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
     }
   }
 
+  String _buildLocationString(Map<String, dynamic> tournamentData) {
+    final venue = tournamentData['venue']?.toString();
+    final city = tournamentData['city']?.toString();
+    
+    if (venue != null && venue.isNotEmpty && city != null && city.isNotEmpty) {
+      return '$venue, $city';
+    } else if (city != null && city.isNotEmpty) {
+      return city;
+    } else {
+      return 'Unknown Location';
+    }
+  }
+
   Future<void> _selectDate(BuildContext context) async {
     final DateTime? picked = await showDatePicker(
       context: context,
@@ -140,13 +178,13 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
       builder: (context, child) {
         return Theme(
           data: Theme.of(context).copyWith(
-            colorScheme: const ColorScheme.light(
-              primary: Color(0xFFF4A261), // Accent
-              onPrimary: Color(0xFFFDFCFB), // Background
-              surface: Color(0xFFFFFFFF), // Surface
-              onSurface: Color(0xFF333333), // Text Primary
+            colorScheme: ColorScheme.light(
+              primary: _accentColor,
+              onPrimary: _backgroundColor,
+              surface: Colors.white,
+              onSurface: _textColor,
             ),
-            dialogBackgroundColor: const Color(0xFFFDFCFB), // Background
+            dialogBackgroundColor: _backgroundColor,
           ),
           child: child!,
         );
@@ -196,30 +234,30 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                   margin: const EdgeInsets.only(right: 8),
                   decoration: BoxDecoration(
                     color: isSelected
-                        ? const Color(0xFFF4A261) // Accent
+                        ? _accentColor
                         : hasMatches
-                            ? const Color(0xFF2A9D8F) // Success
-                            : const Color(0xFFFFFFFF), // Surface
+                            ? _successColor
+                            : Colors.white,
                     borderRadius: BorderRadius.circular(12),
                     border: Border.all(
                       color: isSelected
-                          ? const Color(0xFFF4A261) // Accent
+                          ? _accentColor
                           : hasMatches
-                              ? const Color(0xFF2A9D8F) // Success
-                              : const Color(0xFFA8DADC), // Cool Blue Highlights
+                              ? _successColor
+                              : _coolBlue,
                       width: hasMatches ? 2 : 1,
                     ),
                     boxShadow: hasMatches
                         ? [
                             BoxShadow(
-                              color: const Color(0xFF2A9D8F).withOpacity(0.3), // Success
+                              color: _successColor.withOpacity(0.3),
                               blurRadius: 4,
                               spreadRadius: 1,
                             )
                           ]
                         : [
                             BoxShadow(
-                              color: const Color(0xFF1D3557).withOpacity(0.2), // Deep Indigo
+                              color: Colors.black.withOpacity(0.05),
                               blurRadius: 4,
                               spreadRadius: 1,
                             ),
@@ -231,7 +269,7 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                       Text(
                         DateFormat('MMM').format(date).toUpperCase(),
                         style: GoogleFonts.poppins(
-                          color: isSelected ? const Color(0xFFFDFCFB) : const Color(0xFF757575), // Background or Text Secondary
+                          color: isSelected ? _backgroundColor : _secondaryText,
                           fontSize: 10,
                           fontWeight: hasMatches ? FontWeight.bold : FontWeight.normal,
                         ),
@@ -240,7 +278,7 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                       Text(
                         DateFormat('EEE').format(date),
                         style: GoogleFonts.poppins(
-                          color: isSelected ? const Color(0xFFFDFCFB) : const Color(0xFF757575), // Background or Text Secondary
+                          color: isSelected ? _backgroundColor : _secondaryText,
                           fontSize: 12,
                           fontWeight: hasMatches ? FontWeight.bold : FontWeight.normal,
                         ),
@@ -249,7 +287,7 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                       Text(
                         DateFormat('dd').format(date),
                         style: GoogleFonts.poppins(
-                          color: isSelected ? const Color(0xFFFDFCFB) : const Color(0xFF333333), // Background or Text Primary
+                          color: isSelected ? _backgroundColor : _textColor,
                           fontSize: 16,
                           fontWeight: FontWeight.bold,
                         ),
@@ -259,8 +297,8 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                           margin: const EdgeInsets.only(top: 4),
                           width: 6,
                           height: 6,
-                          decoration: const BoxDecoration(
-                            color: Color(0xFF2A9D8F), // Success
+                          decoration: BoxDecoration(
+                            color: isSelected ? _backgroundColor : _successColor,
                             shape: BoxShape.circle,
                           ),
                         ),
@@ -278,9 +316,9 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
             children: [
               Row(
                 children: [
-                  _buildLegendItem(const Color(0xFF2A9D8F), 'Match Days'), // Success
+                  _buildLegendItem(_successColor, 'Match Days'),
                   const SizedBox(width: 16),
-                  _buildLegendItem(const Color(0xFFF4A261), 'Selected'), // Accent
+                  _buildLegendItem(_accentColor, 'Selected'),
                 ],
               ),
               Row(
@@ -288,7 +326,7 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                   IconButton(
                     icon: Icon(
                       Icons.filter_alt,
-                      color: _filterMatchesOnly ? const Color(0xFFF4A261) : const Color(0xFF757575), // Accent or Text Secondary
+                      color: _filterMatchesOnly ? _accentColor : _secondaryText,
                     ),
                     onPressed: () {
                       setState(() {
@@ -320,7 +358,7 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
         const SizedBox(width: 4),
         Text(
           text,
-          style: GoogleFonts.poppins(color: const Color(0xFF757575), fontSize: 12), // Text Secondary
+          style: GoogleFonts.poppins(color: _secondaryText, fontSize: 12),
         ),
       ],
     );
@@ -332,20 +370,20 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
 
     switch (status.toLowerCase()) {
       case 'completed':
-        backgroundColor = const Color(0xFF2A9D8F); // Success
-        textColor = const Color(0xFFFDFCFB); // Background
+        backgroundColor = _successColor;
+        textColor = _backgroundColor;
         break;
       case 'ongoing':
-        backgroundColor = const Color(0xFFE9C46A); // Mood Booster
-        textColor = const Color(0xFF333333); // Text Primary
+        backgroundColor = _moodColor;
+        textColor = _textColor;
         break;
       case 'cancelled':
-        backgroundColor = const Color(0xFFE76F51); // Error
-        textColor = const Color(0xFFFDFCFB); // Background
+        backgroundColor = _errorColor;
+        textColor = _backgroundColor;
         break;
       default: // scheduled
-        backgroundColor = const Color(0xFFA8DADC); // Cool Blue Highlights
-        textColor = const Color(0xFF333333); // Text Primary
+        backgroundColor = _coolBlue;
+        textColor = _textColor;
     }
 
     return Chip(
@@ -365,37 +403,37 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
   @override
   Widget build(BuildContext context) {
     return Scaffold(
-      backgroundColor: const Color(0xFFFDFCFB), // Background
+      backgroundColor: _backgroundColor,
       appBar: AppBar(
-        backgroundColor: Colors.transparent,
+        backgroundColor: Color(0xFF6C9A8B),
         elevation: 0,
         title: Text(
           'Umpire Schedule',
           style: GoogleFonts.poppins(
-            color: const Color(0xFF333333), // Text Primary
+            color: _textColor,
             fontWeight: FontWeight.bold,
           ),
         ),
         leading: IconButton(
-          icon: const Icon(Icons.arrow_back, color: Color(0xFF757575)), // Text Secondary
+          icon: Icon(Icons.arrow_back, color: _secondaryText),
           onPressed: () => Navigator.pop(context),
         ),
         actions: [
           IconButton(
-            icon: const Icon(Icons.calendar_month, color: Color(0xFF757575)), // Text Secondary
+            icon: Icon(Icons.calendar_month, color: _secondaryText),
             onPressed: () => _selectDate(context),
             tooltip: 'Open calendar',
           ),
           IconButton(
-            icon: const Icon(Icons.refresh, color: Color(0xFF757575)), // Text Secondary
+            icon: Icon(Icons.refresh, color: _secondaryText),
             onPressed: _fetchMatches,
             tooltip: 'Refresh schedule',
           ),
         ],
         flexibleSpace: Container(
-          decoration: const BoxDecoration(
+          decoration: BoxDecoration(
             gradient: LinearGradient(
-              colors: [Color(0xFF6C9A8B), Color(0xFFC1DADB)], // Primary to Secondary
+              colors: [Color(0xFF6C9A8B), Color(0xFF6C9A8B)],
               begin: Alignment.topCenter,
               end: Alignment.bottomCenter,
             ),
@@ -406,9 +444,9 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
         children: [
           _buildCalendarRow(),
           if (_isLoading)
-            const LinearProgressIndicator(
+            LinearProgressIndicator(
               minHeight: 2,
-              color: Color(0xFFF4A261), // Accent
+              color: _accentColor,
             ),
           Expanded(
             child: _errorMessage != null
@@ -418,21 +456,33 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                       child: Column(
                         mainAxisAlignment: MainAxisAlignment.center,
                         children: [
+                          Icon(Icons.error_outline, size: 48, color: _errorColor),
+                          const SizedBox(height: 16),
+                          Text(
+                            'Failed to load schedule',
+                            style: GoogleFonts.poppins(
+                              color: _errorColor, 
+                              fontSize: 18,
+                              fontWeight: FontWeight.w600,
+                            ),
+                          ),
+                          const SizedBox(height: 8),
                           Text(
                             _errorMessage!,
-                            style: GoogleFonts.poppins(color: const Color(0xFFE76F51), fontSize: 16), // Error
+                            style: GoogleFonts.poppins(color: _secondaryText, fontSize: 14),
                             textAlign: TextAlign.center,
                           ),
                           const SizedBox(height: 16),
                           ElevatedButton(
                             onPressed: _fetchMatches,
                             style: ElevatedButton.styleFrom(
-                              backgroundColor: const Color(0xFF6C9A8B), // Primary
+                              backgroundColor: _primaryColor,
+                              foregroundColor: Colors.white,
                               shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                             ),
                             child: Text(
                               'Retry',
-                              style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB)), // Background
+                              style: GoogleFonts.poppins(fontWeight: FontWeight.w500),
                             ),
                           ),
                         ],
@@ -444,16 +494,16 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                         child: Column(
                           mainAxisAlignment: MainAxisAlignment.center,
                           children: [
-                            const Icon(Icons.event_busy, size: 48, color: Color(0xFF757575)), // Text Secondary
+                            Icon(Icons.event_busy, size: 48, color: _secondaryText),
                             const SizedBox(height: 16),
                             Text(
                               'No matches scheduled for',
-                              style: GoogleFonts.poppins(color: const Color(0xFF757575), fontSize: 18), // Text Secondary
+                              style: GoogleFonts.poppins(color: _secondaryText, fontSize: 18),
                             ),
                             Text(
                               DateFormat('MMMM dd, yyyy').format(_selectedDate),
                               style: GoogleFonts.poppins(
-                                color: const Color(0xFF333333), // Text Primary
+                                color: _textColor,
                                 fontSize: 20,
                                 fontWeight: FontWeight.bold,
                               ),
@@ -462,12 +512,13 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                             ElevatedButton(
                               onPressed: _fetchMatches,
                               style: ElevatedButton.styleFrom(
-                                backgroundColor: const Color(0xFF6C9A8B), // Primary
+                                backgroundColor: _primaryColor,
+                                foregroundColor: Colors.white,
                                 shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                               ),
                               child: Text(
                                 'Refresh Data',
-                                style: GoogleFonts.poppins(color: const Color(0xFFFDFCFB)), // Background
+                                style: GoogleFonts.poppins(fontWeight: FontWeight.w500),
                               ),
                             ),
                           ],
@@ -481,14 +532,15 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                           final startTimeInTz = match['startTimeInTz'] as tz.TZDateTime;
                           final timezoneDisplay = match['timezone'] == 'Asia/Kolkata' ? 'IST' : match['timezone'];
                           final formattedTime = DateFormat('hh:mm a').format(startTimeInTz) + ' $timezoneDisplay';
+                          
                           return Card(
-                            color: const Color(0xFFFFFFFF), // Surface
+                            color: Colors.white,
                             margin: const EdgeInsets.only(bottom: 12),
                             shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
                             elevation: 4,
-                            shadowColor: const Color(0xFF1D3557).withOpacity(0.2), // Deep Indigo
+                            shadowColor: Colors.black.withOpacity(0.1),
                             child: Padding(
-                              padding: const EdgeInsets.all(12),
+                              padding: const EdgeInsets.all(16),
                               child: Column(
                                 crossAxisAlignment: CrossAxisAlignment.start,
                                 children: [
@@ -499,7 +551,7 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                                         child: Text(
                                           '${match['player1']} vs ${match['player2']}',
                                           style: GoogleFonts.poppins(
-                                            color: const Color(0xFF333333), // Text Primary
+                                            color: _textColor,
                                             fontWeight: FontWeight.w600,
                                             fontSize: 16,
                                           ),
@@ -508,29 +560,63 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                                       _buildMatchStatusChip(match['status']),
                                     ],
                                   ),
-                                  const SizedBox(height: 8),
+                                  const SizedBox(height: 12),
+                                  
+                                  // Tournament and Round info
                                   Row(
                                     children: [
-                                      const Icon(Icons.event, color: Color(0xFF757575), size: 16), // Text Secondary
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        match['tournamentName'],
-                                        style: GoogleFonts.poppins(color: const Color(0xFF757575), fontSize: 12), // Text Secondary
+                                      Icon(Icons.emoji_events_outlined, color: _secondaryText, size: 16),
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                        child: Text(
+                                          match['tournamentName'],
+                                          style: GoogleFonts.poppins(color: _secondaryText, fontSize: 13),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
+                                      ),
+                                      Container(
+                                        padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 4),
+                                        decoration: BoxDecoration(
+                                          color: _primaryColor.withOpacity(0.1),
+                                          borderRadius: BorderRadius.circular(8),
+                                        ),
+                                        child: Text(
+                                          'Round ${match['round']}',
+                                          style: GoogleFonts.poppins(
+                                            color: _primaryColor,
+                                            fontSize: 11,
+                                            fontWeight: FontWeight.w600,
+                                          ),
+                                        ),
                                       ),
                                     ],
                                   ),
-                                  const SizedBox(height: 4),
+                                  
+                                  const SizedBox(height: 8),
+                                  
+                                  // Court, Time Slot, and Time info
                                   Row(
                                     children: [
-                                      const Icon(Icons.access_time, color: Color(0xFF757575), size: 16), // Text Secondary
+                                      if (match['court'] != null) ...[
+                                        Icon(Icons.location_on_outlined, color: _secondaryText, size: 16),
+                                        const SizedBox(width: 4),
+                                        Text(
+                                          'Court ${match['court']}',
+                                          style: GoogleFonts.poppins(color: _secondaryText, fontSize: 12),
+                                        ),
+                                        const SizedBox(width: 12),
+                                      ],
+                                      Icon(Icons.access_time, color: _secondaryText, size: 16),
                                       const SizedBox(width: 4),
-                                      Text(
-                                        formattedTime,
-                                        style: GoogleFonts.poppins(color: const Color(0xFF757575), fontSize: 12), // Text Secondary
+                                      Expanded(
+                                        child: Text(
+                                          match['timeSlot'] ?? formattedTime,
+                                          style: GoogleFonts.poppins(color: _secondaryText, fontSize: 12),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
                                       ),
-                                      const Spacer(),
                                       IconButton(
-                                        icon: const Icon(Icons.info_outline, color: Color(0xFFF4A261), size: 20), // Accent
+                                        icon: Icon(Icons.info_outline, color: _accentColor, size: 20),
                                         onPressed: () {
                                           Navigator.push(
                                             context,
@@ -538,7 +624,7 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                                               builder: (_) => MatchControlPage(
                                                 tournamentId: match['tournamentId'],
                                                 match: match['match'],
-                                                matchIndex: match['matchIndex'],
+                                                matchIndex: 0, // This might need adjustment based on your MatchControlPage requirements
                                                 isDoubles: match['isDoubles'],
                                               ),
                                             ),
@@ -548,16 +634,40 @@ class _UmpireSchedulePageState extends State<UmpireSchedulePage> {
                                       ),
                                     ],
                                   ),
+                                  
+                                  // Location
                                   Row(
                                     children: [
-                                      const Icon(Icons.location_on, color: Color(0xFF757575), size: 16), // Text Secondary
-                                      const SizedBox(width: 4),
-                                      Text(
-                                        match['location'],
-                                        style: GoogleFonts.poppins(color: const Color(0xFF757575), fontSize: 12), // Text Secondary
+                                      Icon(Icons.place_outlined, color: _secondaryText, size: 16),
+                                      const SizedBox(width: 6),
+                                      Expanded(
+                                        child: Text(
+                                          match['location'],
+                                          style: GoogleFonts.poppins(color: _secondaryText, fontSize: 12),
+                                          overflow: TextOverflow.ellipsis,
+                                        ),
                                       ),
                                     ],
                                   ),
+                                  
+                                  // Event ID (for debugging/reference)
+                                  if (match['eventId'] != null) ...[
+                                    const SizedBox(height: 4),
+                                    Row(
+                                      children: [
+                                        Icon(Icons.category_outlined, color: _secondaryText, size: 14),
+                                        const SizedBox(width: 6),
+                                        Text(
+                                          'Event: ${match['eventId']}',
+                                          style: GoogleFonts.poppins(
+                                            color: _secondaryText.withOpacity(0.8),
+                                            fontSize: 11,
+                                            fontStyle: FontStyle.italic,
+                                          ),
+                                        ),
+                                      ],
+                                    ),
+                                  ],
                                 ],
                               ),
                             ),

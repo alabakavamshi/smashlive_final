@@ -1,3 +1,4 @@
+import 'dart:async';
 import 'package:bloc/bloc.dart';
 import 'package:firebase_auth/firebase_auth.dart' as firebase_auth;
 import 'package:cloud_firestore/cloud_firestore.dart';
@@ -6,13 +7,13 @@ import 'package:game_app/blocs/auth/auth_event.dart';
 import 'package:game_app/blocs/auth/auth_state.dart';
 import 'package:game_app/models/user_model.dart';
 import 'package:rxdart/rxdart.dart';
-import 'dart:async';
-import 'package:firebase_app_check/firebase_app_check.dart'; // Added for App Check
+import 'package:firebase_app_check/firebase_app_check.dart';
 
 class AuthBloc extends Bloc<AuthEvent, AuthState> {
   final firebase_auth.FirebaseAuth _auth;
   final FirebaseFirestore _firestore;
   StreamSubscription<firebase_auth.User?>? _authSubscription;
+  String? _lastProcessedUid; // Added to track last processed UID
 
   AuthBloc({
     firebase_auth.FirebaseAuth? firebaseAuth,
@@ -37,21 +38,18 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
     on<AuthLinkEmailCredentialEvent>(_onAuthLinkEmailCredential);
     on<AuthStateChangedEvent>(_onAuthStateChanged);
 
-    _initializeAppCheck(); // Initialize App Check
+    _initializeAppCheck();
     add(AuthCheckEvent());
   }
 
   Future<void> _initializeAppCheck() async {
     try {
       await FirebaseAppCheck.instance.activate(
-        androidProvider: AndroidProvider.playIntegrity, // Use Play Integrity for production
-        // Use AndroidProvider.debug with a debug token for testing
-        // appleProvider: AppleProvider.deviceCheck, // Uncomment for iOS
+        androidProvider: AndroidProvider.playIntegrity,
       );
       debugPrint('App Check activated successfully');
     } catch (e) {
       debugPrint('App Check activation failed: $e');
-      // Emit an error state if App Check fails, but allow the app to proceed
       add(AuthError('App Check initialization failed: $e') as AuthEvent);
     }
   }
@@ -107,12 +105,17 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
 
   Future<void> _onAuthStateChanged(AuthStateChangedEvent event, Emitter<AuthState> emit) async {
     try {
-      debugPrint('authStateChanges: user = ${event.user}');
-      if (event.user != null) {
+      if (event.user != null && event.user!.uid != _lastProcessedUid) {
+        _lastProcessedUid = event.user!.uid;
+        debugPrint('Processing authStateChanges for UID: ${event.user!.uid}');
         final appUser = await _fetchUserProfile(event.user!.uid);
         emit(AuthAuthenticated(event.user!, appUser: appUser));
-      } else {
+      } else if (event.user == null) {
+        _lastProcessedUid = null;
+        debugPrint('authStateChanges: User is null, emitting AuthUnauthenticated');
         emit(AuthUnauthenticated());
+      } else {
+        debugPrint('Skipping redundant authStateChanges for UID: ${event.user!.uid}');
       }
     } catch (e, stackTrace) {
       debugPrint('AuthStateChanged error: $e\nStack: $stackTrace');
@@ -205,21 +208,17 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
         verificationCompleted: (firebase_auth.PhoneAuthCredential credential) async {
           try {
             final userCredential = await _auth.signInWithCredential(credential);
-            if (userCredential.user != null) {
-              if (event.isSignup) {
-                await _firestore.collection('users').doc(userCredential.user!.uid).set({
-                  'uid': userCredential.user!.uid,
-                  'phone': userCredential.user!.phoneNumber ?? '',
-                  'role': event.role ?? 'player',
-                  'createdAt': FieldValue.serverTimestamp(),
-                  'isProfileComplete': false,
-                });
-              }
-              final appUser = await _fetchUserProfile(userCredential.user!.uid);
-              emit(AuthAuthenticated(userCredential.user!, appUser: appUser));
-            } else {
-              emit(AuthError('Auto-verification failed'));
+            if (userCredential.user != null && event.isSignup) {
+              await _firestore.collection('users').doc(userCredential.user!.uid).set({
+                'uid': userCredential.user!.uid,
+                'phone': userCredential.user!.phoneNumber ?? '',
+                'role': event.role ?? 'player',
+                'createdAt': FieldValue.serverTimestamp(),
+                'isProfileComplete': false,
+              });
             }
+            final appUser = await _fetchUserProfile(userCredential.user!.uid);
+            emit(AuthAuthenticated(userCredential.user!, appUser: appUser));
           } catch (e, stackTrace) {
             debugPrint('Auto-verification error: $e\nStack: $stackTrace');
             emit(AuthError('Auto-verification failed: $e'));
@@ -229,7 +228,6 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
         },
         verificationFailed: (firebase_auth.FirebaseAuthException e) {
           debugPrint('Verification failed: ${e.message}');
-          // Check if reCAPTCHA is triggered and suggest App Check setup
           if (e.message?.contains('reCAPTCHA') == true) {
             emit(AuthError('reCAPTCHA required. Ensure App Check is configured with Play Integrity.'));
           } else {
@@ -348,6 +346,7 @@ class AuthBloc extends Bloc<AuthEvent, AuthState> {
       await _authSubscription?.cancel();
       _authSubscription = null;
       await _auth.signOut();
+      _lastProcessedUid = null; // Reset last processed UID
       debugPrint('Logout successful: Emitting AuthUnauthenticated');
       emit(AuthUnauthenticated());
     } catch (e, stackTrace) {

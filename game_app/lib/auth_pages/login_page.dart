@@ -1,5 +1,5 @@
 import 'dart:async';
-import 'dart:io' show Platform; // Added for platform detection
+import 'dart:io' show Platform;
 import 'package:country_code_picker/country_code_picker.dart';
 import 'package:flutter/foundation.dart';
 import 'package:flutter/material.dart';
@@ -12,7 +12,7 @@ import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:firebase_auth/firebase_auth.dart' as firebase_auth;
 import 'package:toastification/toastification.dart';
 import 'package:geolocator/geolocator.dart';
-import 'package:firebase_app_check/firebase_app_check.dart'; // Added for App Check
+import 'package:firebase_app_check/firebase_app_check.dart';
 
 class LoginPage extends StatefulWidget {
   final String? role;
@@ -58,21 +58,19 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     super.initState();
     _initializeControllers();
     _testFirestoreConnectivity();
-    _initializeAppCheck(); // Initialize App Check
+    _initializeAppCheck();
   }
 
   Future<void> _initializeAppCheck() async {
     try {
       if (Platform.isIOS) {
-        // For iOS, use App Attest (iOS 14.0+) with fallback to DeviceCheck
         await FirebaseAppCheck.instance.activate(
-          appleProvider: kDebugMode ? AppleProvider.debug : AppleProvider.appAttest,   );
+          appleProvider: kDebugMode ? AppleProvider.debug : AppleProvider.appAttest,
+        );
         debugPrint('App Check activated with App Attest for iOS');
       } else if (Platform.isAndroid) {
-        // For Android, use Play Integrity
         await FirebaseAppCheck.instance.activate(
-          androidProvider: AndroidProvider.playIntegrity, // Use Play Integrity for production
-          // androidProvider: AndroidProvider.debug, // Uncomment for debug builds (requires debug token)
+          androidProvider: kDebugMode ? AndroidProvider.debug : AndroidProvider.playIntegrity,
         );
         debugPrint('App Check activated with Play Integrity for Android');
       } else {
@@ -97,12 +95,14 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     for (var controller in _otpControllers) {
       controller.clear();
     }
-    setState(() {
-      _showOtpField = false;
-      _verificationId = null;
-      _signupStep = 0;
-      _isLoading = false;
-    });
+    if (mounted) {
+      setState(() {
+        _showOtpField = false;
+        _verificationId = null;
+        _signupStep = 0;
+        _isLoading = false;
+      });
+    }
     debugPrint('All login data reset');
   }
 
@@ -171,7 +171,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
 
   String _normalizePhoneNumber(String phone) {
     phone = phone.trim();
-    if (!phone.startsWith(_selectedCountry.dialCode as Pattern)) {
+    if (!phone.startsWith(_selectedCountry.dialCode ?? '')) {
       return '${_selectedCountry.dialCode}$phone';
     }
     return phone;
@@ -185,18 +185,8 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
           .collection('users')
           .where(field, isEqualTo: value.trim())
           .get()
-          .timeout(
-            const Duration(seconds: 10),
-            onTimeout: () {
-              debugPrint(
-                'Firestore uniqueness query timed out for $field: $value',
-              );
-              throw Exception('Firestore query timed out');
-            },
-          );
-      debugPrint(
-        'Uniqueness check result for $field: ${querySnapshot.docs.isEmpty ? 'Unique' : 'Not unique'}',
-      );
+          .timeout(const Duration(seconds: 10));
+      debugPrint('Uniqueness check result for $field: ${querySnapshot.docs.isEmpty ? 'Unique' : 'Not unique'}');
       return querySnapshot.docs.isEmpty;
     } catch (e, stackTrace) {
       debugPrint('checkFieldUniqueness error: $e\nStack: $stackTrace');
@@ -227,9 +217,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     }
 
     try {
-      await firebase_auth.FirebaseAuth.instance.sendPasswordResetEmail(
-        email: email,
-      );
+      await firebase_auth.FirebaseAuth.instance.sendPasswordResetEmail(email: email);
       if (mounted) {
         toastification.show(
           context: context,
@@ -253,43 +241,84 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     }
   }
 
-  Future<void> _checkAndCompleteMissingDetails(String uid) async {
-    debugPrint('Checking missing details for UID: $uid');
+  Future<void> _checkAndCompleteMissingDetails(BuildContext context, String uid) async {
+    debugPrint('Checking missing details for UID: $uid at ${DateTime.now()}');
     try {
-      final userDoc =
-          await FirebaseFirestore.instance.collection('users').doc(uid).get();
+      final userDoc = await FirebaseFirestore.instance.collection('users').doc(uid).get();
       debugPrint('User document exists: ${userDoc.exists}');
 
       if (!userDoc.exists) {
-        debugPrint(
-          'User document not found for UID: $uid, triggering profile creation',
-        );
-        await _collectMissingDetails(context, uid);
+        debugPrint('User document not found for UID: $uid, triggering profile creation');
+        final completer = Completer<void>();
+        await _collectMissingDetails(context, uid, completer);
+        await completer.future;
+        if (mounted) {
+          debugPrint('Post-dialog navigation for UID: $uid');
+          _navigateBasedOnRole(uid);
+        }
         return;
       }
 
       final data = userDoc.data()!;
       debugPrint('User data: $data');
-      final bool isMissingDetails =
-          data['firstName'] == null ||
-          data['lastName'] == null ||
-          (data['phone'] == null || data['phone'].isEmpty) ||
-          data['profileImage'] == null ||
-          data['gender'] == null;
+      
+      if (data['isProfileComplete'] == true) {
+        debugPrint('Profile is complete (isProfileComplete=true), navigating for UID: $uid');
+        if (mounted) {
+          _navigateBasedOnRole(uid);
+        }
+        return;
+      }
+      
+      final bool hasFirstName = data.containsKey('firstName') && 
+          data['firstName'] != null && 
+          data['firstName'].toString().trim().isNotEmpty;
+      
+      final bool hasLastName = data.containsKey('lastName') && 
+          data['lastName'] != null && 
+          data['lastName'].toString().trim().isNotEmpty;
+      
+      final bool hasProfileImage = data.containsKey('profileImage') && 
+          data['profileImage'] != null && 
+          data['profileImage'].toString().trim().isNotEmpty;
+      
+      final bool hasGender = data.containsKey('gender') && 
+          data['gender'] != null && 
+          data['gender'].toString().trim().isNotEmpty;
 
-      if (isMissingDetails && !_isDialogOpen) {
-        debugPrint(
-          'Missing details detected, showing completion dialog for UID: $uid',
-        );
-        await _collectMissingDetails(context, uid);
+      final bool isProfileComplete = hasFirstName && hasLastName && hasProfileImage && hasGender;
+
+      debugPrint('Profile completeness check: '
+          'firstName=$hasFirstName, '
+          'lastName=$hasLastName, '
+          'profileImage=$hasProfileImage, '
+          'gender=$hasGender, '
+          'isComplete=$isProfileComplete');
+
+      if (!isProfileComplete) {
+        if (_isDialogOpen) {
+          debugPrint('Dialog already open, skipping for UID: $uid');
+          return;
+        }
+        
+        debugPrint('Missing details detected, showing dialog for UID: $uid');
+        final completer = Completer<void>();
+        await _collectMissingDetails(context, uid, completer);
+        await completer.future;
+        debugPrint('Dialog completed for UID: $uid');
+        
+        if (mounted) {
+          debugPrint('Post-dialog navigation for UID: $uid');
+          _navigateBasedOnRole(uid);
+        }
       } else {
-        debugPrint('All details present, navigating for UID: $uid');
-        _navigateBasedOnRole(uid);
+        debugPrint('Profile has all required fields, navigating for UID: $uid');
+        if (mounted) {
+          _navigateBasedOnRole(uid);
+        }
       }
     } catch (e, stackTrace) {
-      debugPrint(
-        'checkAndCompleteMissingDetails error: $e\nStack: $stackTrace',
-      );
+      debugPrint('checkAndCompleteMissingDetails error: $e\nStack: $stackTrace');
       if (mounted) {
         setState(() => _isLoading = false);
         toastification.show(
@@ -303,34 +332,40 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     }
   }
 
-  Future<void> _collectMissingDetails(BuildContext context, String uid) async {
-    if (!mounted || _isDialogOpen || _authBloc == null) {
-      debugPrint(
-        'Dialog already open or widget not mounted, skipping dialog for UID: $uid',
-      );
+  Future<void> _collectMissingDetails(BuildContext context, String uid, Completer<void> completer) async {
+    if (_isDialogOpen) {
+      debugPrint('Dialog already open, skipping for UID: $uid at ${DateTime.now()}');
+      completer.complete();
       return;
     }
+
+    if (!mounted) {
+      debugPrint('Widget not mounted, skipping dialog for UID: $uid at ${DateTime.now()}');
+      completer.complete();
+      return;
+    }
+
     setState(() => _isDialogOpen = true);
+    debugPrint('Opening dialog for UID: $uid at ${DateTime.now()}');
 
     final firstNameController = TextEditingController();
     final lastNameController = TextEditingController();
     final phoneController = TextEditingController();
-    final List<TextEditingController> otpControllers = List.generate(
-      6,
-      (_) => TextEditingController(),
-    );
+    final List<TextEditingController> otpControllers = List.generate(6, (_) => TextEditingController());
     String? verificationId;
     bool isPhoneVerifying = false;
     bool isDialogClosing = false;
     String? selectedGender;
     int? selectedProfileImageIndex;
 
-    final List<String> genders = [
-      'Male',
-      'Female',
-      'Other',
-      'Prefer not to say',
-    ];
+    final bool isPhoneLogin = _usePhone;
+    final String userPhone = _normalizePhoneNumber(_phoneController.text.trim());
+
+    if (isPhoneLogin && userPhone.isNotEmpty) {
+      phoneController.text = userPhone;
+    }
+
+    final List<String> genders = ['Male', 'Female'];
     final List<String> profileImages = [
       'assets/sketch1.jpg',
       'assets/sketch2.jpeg',
@@ -339,201 +374,242 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     ];
 
     try {
-      await showDialog(
+      await showDialog<void>(
         context: context,
         barrierDismissible: false,
-        builder:
-            (dialogContext) => StatefulBuilder(
-              builder: (dialogContext, setDialogState) {
-                if (!mounted || isDialogClosing) return const SizedBox.shrink();
-
-                return Dialog(
-                  shape: RoundedRectangleBorder(
+        builder: (dialogContext) => StatefulBuilder(
+          builder: (dialogContext, setDialogState) {
+            debugPrint('Dialog builder entered for UID: $uid at ${DateTime.now()}');
+            return Dialog(
+              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(20)),
+              child: ConstrainedBox(
+                constraints: BoxConstraints(
+                  minWidth: 280,
+                  maxWidth: MediaQuery.of(context).size.width * 0.8,
+                  minHeight: 300,
+                  maxHeight: MediaQuery.of(context).size.height * 0.7,
+                ),
+                child: Container(
+                  decoration: BoxDecoration(
+                    color: _darkBackground,
                     borderRadius: BorderRadius.circular(20),
                   ),
-                  child: Container(
-                    decoration: BoxDecoration(
-                      color: _darkBackground,
-                      borderRadius: BorderRadius.circular(20),
-                    ),
-                    padding: const EdgeInsets.all(20),
-                    child: SingleChildScrollView(
-                      child: Column(
-                        mainAxisSize: MainAxisSize.min,
-                        children: [
-                          Row(
+                  padding: const EdgeInsets.all(12),
+                  child: SingleChildScrollView(
+                    child: Column(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                        SingleChildScrollView(
+                          scrollDirection: Axis.horizontal,
+                          child: Row(
+                            mainAxisSize: MainAxisSize.min,
                             mainAxisAlignment: MainAxisAlignment.center,
                             children: [
-                              _buildStepIndicator(0, "Profile"),
+                              Flexible(child: SizedBox(width: 50, child: _buildStepIndicator(0, "Profile"))),
+                              const SizedBox(width: 8),
                               _buildStepConnector(),
-                              _buildStepIndicator(1, "Basic Info"),
+                              const SizedBox(width: 8),
+                              Flexible(child: SizedBox(width: 50, child: _buildStepIndicator(1, "Basic Info"))),
+                              const SizedBox(width: 8),
                               _buildStepConnector(),
-                              _buildStepIndicator(2, "Phone"),
+                              const SizedBox(width: 8),
+                              Flexible(child: SizedBox(width: 50, child: _buildStepIndicator(2, isPhoneLogin ? "Phone Confirm" : "Phone"))),
+                              const SizedBox(width: 8),
                               _buildStepConnector(),
-                              _buildStepIndicator(3, "Gender"),
+                              const SizedBox(width: 8),
+                              Flexible(child: SizedBox(width: 50, child: _buildStepIndicator(3, "Gender"))),
                             ],
                           ),
-                          const SizedBox(height: 20),
-                          if (_signupStep == 0) ...[
-                            Text(
-                              'Step 1: Select Profile Image',
-                              style: GoogleFonts.poppins(
-                                color: _textColor,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 22,
-                              ),
+                        ),
+                        const SizedBox(height: 12),
+                        if (_signupStep == 0) ...[
+                          Text(
+                            'Step 1: Select Profile Image',
+                            style: GoogleFonts.poppins(
+                              color: _textColor,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18,
                             ),
-                            const SizedBox(height: 20),
-                            GridView.builder(
-                              shrinkWrap: true,
-                              physics: const NeverScrollableScrollPhysics(),
-                              gridDelegate:
-                                  const SliverGridDelegateWithFixedCrossAxisCount(
-                                    crossAxisCount: 2,
-                                    crossAxisSpacing: 20,
-                                    mainAxisSpacing: 20,
-                                  ),
-                              itemCount: profileImages.length,
-                              itemBuilder: (context, index) {
-                                return GestureDetector(
-                                  onTap: () {
-                                    setDialogState(() {
-                                      selectedProfileImageIndex = index;
-                                    });
-                                  },
-                                  child: Container(
-                                    decoration: BoxDecoration(
-                                      borderRadius: BorderRadius.circular(12),
-                                      border: Border.all(
-                                        color:
-                                            selectedProfileImageIndex == index
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 12),
+                          SizedBox(
+                            height: 120,
+                            child: SingleChildScrollView(
+                              scrollDirection: Axis.horizontal,
+                              child: Row(
+                                children: List.generate(
+                                  profileImages.length,
+                                  (index) => Padding(
+                                    padding: const EdgeInsets.symmetric(horizontal: 6),
+                                    child: GestureDetector(
+                                      onTap: () {
+                                        if (!isDialogClosing) {
+                                          setDialogState(() {
+                                            selectedProfileImageIndex = index;
+                                            debugPrint('Selected profile image index: $index at ${DateTime.now()}');
+                                          });
+                                        }
+                                      },
+                                      child: Container(
+                                        width: 80,
+                                        height: 80,
+                                        decoration: BoxDecoration(
+                                          borderRadius: BorderRadius.circular(10),
+                                          border: Border.all(
+                                            color: selectedProfileImageIndex == index
                                                 ? _primaryColor
                                                 : Colors.transparent,
-                                        width: 3,
-                                      ),
-                                    ),
-                                    child: ClipRRect(
-                                      borderRadius: BorderRadius.circular(8),
-                                      child: Image.asset(
-                                        profileImages[index],
-                                        fit: BoxFit.cover,
+                                            width: 2,
+                                          ),
+                                        ),
+                                        child: ClipRRect(
+                                          borderRadius: BorderRadius.circular(8),
+                                          child: Image.asset(
+                                            profileImages[index],
+                                            fit: BoxFit.cover,
+                                            errorBuilder: (context, error, stackTrace) {
+                                              debugPrint('Image load error: $error at ${DateTime.now()}');
+                                              return Container(
+                                                color: Colors.grey,
+                                                child: const Icon(Icons.error, color: Colors.red),
+                                              );
+                                            },
+                                          ),
+                                        ),
                                       ),
                                     ),
                                   ),
-                                );
-                              },
+                                ),
+                              ),
                             ),
-                          ] else if (_signupStep == 1) ...[
+                          ),
+                        ] else if (_signupStep == 1) ...[
+                          Text(
+                            'Step 2: Basic Information',
+                            style: GoogleFonts.poppins(
+                              color: _textColor,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18,
+                            ),
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 12),
+                          TextField(
+                            controller: firstNameController,
+                            style: GoogleFonts.poppins(color: _textColor),
+                            decoration: InputDecoration(
+                              labelText: 'First Name',
+                              labelStyle: GoogleFonts.poppins(color: _secondaryTextColor),
+                              filled: true,
+                              fillColor: _inputBackground,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: BorderSide.none,
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: BorderSide(color: _secondaryTextColor.withOpacity(0.2)),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: BorderSide(color: _primaryColor, width: 2),
+                              ),
+                              prefixIcon: Icon(Icons.person, color: _secondaryTextColor),
+                            ),
+                          ),
+                          const SizedBox(height: 10),
+                          TextField(
+                            controller: lastNameController,
+                            style: GoogleFonts.poppins(color: _textColor),
+                            decoration: InputDecoration(
+                              labelText: 'Last Name',
+                              labelStyle: GoogleFonts.poppins(color: _secondaryTextColor),
+                              filled: true,
+                              fillColor: _inputBackground,
+                              border: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: BorderSide.none,
+                              ),
+                              enabledBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: BorderSide(color: _secondaryTextColor.withOpacity(0.2)),
+                              ),
+                              focusedBorder: OutlineInputBorder(
+                                borderRadius: BorderRadius.circular(10),
+                                borderSide: BorderSide(color: _primaryColor, width: 2),
+                              ),
+                              prefixIcon: Icon(Icons.person, color: _secondaryTextColor),
+                            ),
+                          ),
+                        ] else if (_signupStep == 2) ...[
+                          if (isPhoneLogin) ...[
                             Text(
-                              'Step 2: Basic Information',
+                              'Step 3: Phone Confirmation',
                               style: GoogleFonts.poppins(
                                 color: _textColor,
                                 fontWeight: FontWeight.bold,
-                                fontSize: 22,
+                                fontSize: 18,
                               ),
+                              textAlign: TextAlign.center,
                             ),
-                            const SizedBox(height: 20),
-                            TextField(
-                              controller: firstNameController,
+                            const SizedBox(height: 12),
+                            Text(
+                              'Your verified phone number:',
                               style: GoogleFonts.poppins(color: _textColor),
-                              decoration: InputDecoration(
-                                labelText: 'First Name',
-                                labelStyle: GoogleFonts.poppins(
-                                  color: _secondaryTextColor,
-                                ),
-                                filled: true,
-                                fillColor: _inputBackground,
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: BorderSide.none,
-                                ),
-                                enabledBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: BorderSide(
-                                    color: _secondaryTextColor.withOpacity(0.2),
-                                  ),
-                                ),
-                                focusedBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: BorderSide(
-                                    color: _primaryColor,
-                                    width: 2,
-                                  ),
-                                ),
-                                prefixIcon: Icon(
-                                  Icons.person,
-                                  color: _secondaryTextColor,
-                                ),
-                              ),
+                              textAlign: TextAlign.center,
                             ),
-                            const SizedBox(height: 16),
-                            TextField(
-                              controller: lastNameController,
-                              style: GoogleFonts.poppins(color: _textColor),
-                              decoration: InputDecoration(
-                                labelText: 'Last Name',
-                                labelStyle: GoogleFonts.poppins(
-                                  color: _secondaryTextColor,
-                                ),
-                                filled: true,
-                                fillColor: _inputBackground,
-                                border: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: BorderSide.none,
-                                ),
-                                enabledBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: BorderSide(
-                                    color: _secondaryTextColor.withOpacity(0.2),
-                                  ),
-                                ),
-                                focusedBorder: OutlineInputBorder(
-                                  borderRadius: BorderRadius.circular(12),
-                                  borderSide: BorderSide(
-                                    color: _primaryColor,
-                                    width: 2,
-                                  ),
-                                ),
-                                prefixIcon: Icon(
-                                  Icons.person,
-                                  color: _secondaryTextColor,
-                                ),
+                            const SizedBox(height: 8),
+                            Text(
+                              userPhone,
+                              style: GoogleFonts.poppins(
+                                color: _primaryColor,
+                                fontWeight: FontWeight.bold,
+                                fontSize: 16,
                               ),
+                              textAlign: TextAlign.center,
                             ),
-                          ] else if (_signupStep == 2) ...[
+                            const SizedBox(height: 12),
+                            Text(
+                              'This phone number is already verified and will be saved to your profile.',
+                              style: GoogleFonts.poppins(
+                                color: _secondaryTextColor,
+                                fontSize: 12,
+                              ),
+                              textAlign: TextAlign.center,
+                            ),
+                          ] else ...[
                             Text(
                               'Step 3: Add Phone (Optional)',
                               style: GoogleFonts.poppins(
                                 color: _textColor,
                                 fontWeight: FontWeight.bold,
-                                fontSize: 22,
+                                fontSize: 18,
                               ),
+                              textAlign: TextAlign.center,
                             ),
-                            const SizedBox(height: 20),
+                            const SizedBox(height: 12),
                             Row(
                               children: [
                                 Container(
-                                  padding: const EdgeInsets.symmetric(
-                                    horizontal: 12,
-                                    vertical: 16,
-                                  ),
+                                  width: 100,
+                                  padding: const EdgeInsets.symmetric(horizontal: 6, vertical: 10),
                                   decoration: BoxDecoration(
                                     color: _inputBackground,
                                     borderRadius: const BorderRadius.only(
-                                      topLeft: Radius.circular(12),
-                                      bottomLeft: Radius.circular(12),
+                                      topLeft: Radius.circular(10),
+                                      bottomLeft: Radius.circular(10),
                                     ),
-                                    border: Border.all(
-                                      color: _secondaryTextColor.withOpacity(
-                                        0.2,
-                                      ),
-                                    ),
+                                    border: Border.all(color: _secondaryTextColor.withOpacity(0.2)),
                                   ),
                                   child: CountryCodePicker(
                                     onChanged: (CountryCode country) {
-                                      setState(() {
-                                        _selectedCountry = country;
-                                      });
+                                      if (!isDialogClosing) {
+                                        setDialogState(() {
+                                          _selectedCountry = country;
+                                          debugPrint('Country selected: ${country.name} at ${DateTime.now()}');
+                                        });
+                                      }
                                     },
                                     initialSelection: 'IN',
                                     favorite: ['+91', 'IN'],
@@ -542,436 +618,349 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                     alignLeft: false,
                                     textStyle: GoogleFonts.poppins(
                                       color: _textColor,
-                                      fontSize: 16,
+                                      fontSize: 12,
                                       fontWeight: FontWeight.w500,
                                     ),
                                     dialogTextStyle: GoogleFonts.poppins(
                                       color: _textColor,
-                                      fontSize: 16,
+                                      fontSize: 12,
                                     ),
                                     searchDecoration: InputDecoration(
                                       hintText: 'Search country...',
-                                      hintStyle: GoogleFonts.poppins(
-                                        color: _secondaryTextColor,
-                                      ),
-                                      border: OutlineInputBorder(
-                                        borderRadius: BorderRadius.circular(8),
-                                      ),
+                                      hintStyle: GoogleFonts.poppins(color: _secondaryTextColor),
+                                      border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
                                     ),
                                     dialogBackgroundColor: _darkBackground,
                                     backgroundColor: Colors.transparent,
-                                    flagWidth: 25,
+                                    flagWidth: 18,
                                   ),
                                 ),
-                                const SizedBox(width: 1),
                                 Expanded(
                                   child: TextField(
                                     controller: phoneController,
                                     keyboardType: TextInputType.phone,
-                                    style: GoogleFonts.poppins(
-                                      color: _textColor,
-                                    ),
+                                    style: GoogleFonts.poppins(color: _textColor),
                                     decoration: InputDecoration(
                                       labelText: 'Phone Number (Optional)',
-                                      labelStyle: GoogleFonts.poppins(
-                                        color: _secondaryTextColor,
-                                      ),
+                                      labelStyle: GoogleFonts.poppins(color: _secondaryTextColor),
                                       filled: true,
                                       fillColor: _inputBackground,
                                       border: OutlineInputBorder(
                                         borderRadius: const BorderRadius.only(
-                                          topRight: Radius.circular(12),
-                                          bottomRight: Radius.circular(12),
+                                          topRight: Radius.circular(10),
+                                          bottomRight: Radius.circular(10),
                                         ),
                                         borderSide: BorderSide.none,
                                       ),
                                       enabledBorder: OutlineInputBorder(
                                         borderRadius: const BorderRadius.only(
-                                          topRight: Radius.circular(12),
-                                          bottomRight: Radius.circular(12),
+                                          topRight: Radius.circular(10),
+                                          bottomRight: Radius.circular(10),
                                         ),
-                                        borderSide: BorderSide(
-                                          color: _secondaryTextColor
-                                              .withOpacity(0.2),
-                                        ),
+                                        borderSide: BorderSide(color: _secondaryTextColor.withOpacity(0.2)),
                                       ),
                                       focusedBorder: OutlineInputBorder(
                                         borderRadius: const BorderRadius.only(
-                                          topRight: Radius.circular(12),
-                                          bottomRight: Radius.circular(12),
+                                          topRight: Radius.circular(10),
+                                          bottomRight: Radius.circular(10),
                                         ),
-                                        borderSide: BorderSide(
-                                          color: _primaryColor,
-                                          width: 2,
-                                        ),
+                                        borderSide: BorderSide(color: _primaryColor, width: 2),
                                       ),
-                                      prefixIcon: Icon(
-                                        Icons.phone,
-                                        color: _secondaryTextColor,
-                                      ),
+                                      prefixIcon: Icon(Icons.phone, color: _secondaryTextColor),
                                     ),
                                   ),
                                 ),
                               ],
                             ),
                             if (verificationId != null) ...[
-                              const SizedBox(height: 16),
+                              const SizedBox(height: 10),
                               _buildOtpFields(otpControllers),
                             ],
-                            const SizedBox(height: 20),
+                            const SizedBox(height: 12),
                             if (verificationId == null)
                               _buildModernButton(
-                                text:
-                                    isPhoneVerifying
-                                        ? 'Sending...'
-                                        : 'Send OTP',
-                                onPressed:
-                                    isPhoneVerifying
-                                        ? null
-                                        : () async {
-                                          final phone = _normalizePhoneNumber(
-                                            phoneController.text.trim(),
+                                text: isPhoneVerifying ? 'Sending...' : 'Send OTP',
+                                onPressed: isPhoneVerifying
+                                    ? null
+                                    : () async {
+                                        if (isDialogClosing) return;
+                                        final phone = _normalizePhoneNumber(phoneController.text.trim());
+                                        
+                                        if (phone.isEmpty) {
+                                          WidgetsBinding.instance.addPostFrameCallback((_) {
+                                            if (mounted && !isDialogClosing) {
+                                              setDialogState(() {
+                                                _signupStep++;
+                                                debugPrint('No phone provided, skipping to step $_signupStep');
+                                              });
+                                            }
+                                          });
+                                          return;
+                                        }
+                                        
+                                        final phoneError = _validatePhone(phone);
+                                        if (phoneError != null) {
+                                          toastification.show(
+                                            context: dialogContext,
+                                            type: ToastificationType.error,
+                                            title: const Text('Validation Error'),
+                                            description: Text(phoneError),
+                                            autoCloseDuration: const Duration(seconds: 2),
                                           );
-                                          final phoneError = _validatePhone(
-                                            phone,
+                                          return;
+                                        }
+                                        final isPhoneUnique = await _checkFieldUniqueness('phone', phone);
+                                        if (!isPhoneUnique) {
+                                          toastification.show(
+                                            context: dialogContext,
+                                            type: ToastificationType.error,
+                                            title: const Text('Validation Error'),
+                                            description: const Text('Phone number already in use.'),
+                                            autoCloseDuration: const Duration(seconds: 2),
                                           );
-                                          if (phoneError != null) {
-                                            toastification.show(
-                                              context: dialogContext,
-                                              type: ToastificationType.error,
-                                              title: const Text(
-                                                'Validation Error',
-                                              ),
-                                              description: Text(phoneError),
-                                              autoCloseDuration: const Duration(
-                                                seconds: 2,
-                                              ),
-                                            );
-                                            return;
-                                          }
-                                          final isPhoneUnique =
-                                              await _checkFieldUniqueness(
-                                                'phone',
-                                                phone,
-                                              );
-                                          if (!isPhoneUnique) {
-                                            toastification.show(
-                                              context: dialogContext,
-                                              type: ToastificationType.error,
-                                              title: const Text(
-                                                'Validation Error',
-                                              ),
-                                              description: const Text(
-                                                'Phone number already in use by another account.',
-                                              ),
-                                              autoCloseDuration: const Duration(
-                                                seconds: 2,
-                                              ),
-                                            );
-                                            return;
-                                          }
-                                          setDialogState(
-                                            () => isPhoneVerifying = true,
-                                          );
-                                          await firebase_auth
-                                              .FirebaseAuth
-                                              .instance
-                                              .verifyPhoneNumber(
-                                                phoneNumber: phone,
-                                                timeout: const Duration(
-                                                  seconds: 60,
-                                                ),
-                                                verificationCompleted: (
-                                                  credential,
-                                                ) async {
-                                                  final user =
-                                                      firebase_auth
-                                                          .FirebaseAuth
-                                                          .instance
-                                                          .currentUser;
-                                                  if (user != null &&
-                                                      mounted &&
-                                                      !isDialogClosing) {
-                                                    try {
-                                                      await user
-                                                          .linkWithCredential(
-                                                            credential,
-                                                          );
+                                          return;
+                                        }
+                                        setDialogState(() {
+                                          isPhoneVerifying = true;
+                                          debugPrint('Sending OTP for $phone at ${DateTime.now()}');
+                                        });
+                                        try {
+                                          await firebase_auth.FirebaseAuth.instance.verifyPhoneNumber(
+                                            phoneNumber: phone,
+                                            timeout: const Duration(seconds: 60),
+                                            verificationCompleted: (credential) async {
+                                              final user = firebase_auth.FirebaseAuth.instance.currentUser;
+                                              if (user != null && !isDialogClosing) {
+                                                try {
+                                                  await user.linkWithCredential(credential);
+                                                  WidgetsBinding.instance.addPostFrameCallback((_) {
+                                                    if (mounted && !isDialogClosing) {
                                                       setDialogState(() {
                                                         _signupStep++;
-                                                        debugPrint(
-                                                          'Phone linked, advanced to step $_signupStep',
-                                                        );
+                                                        debugPrint('Phone linked, advanced to step $_signupStep');
                                                       });
-                                                    } catch (e, stackTrace) {
-                                                      debugPrint(
-                                                        'Auto phone link error: $e\nStack: $stackTrace',
-                                                      );
-                                                      toastification.show(
-                                                        context: dialogContext,
-                                                        type:
-                                                            ToastificationType
-                                                                .error,
-                                                        title: const Text(
-                                                          'Phone Link Error',
-                                                        ),
-                                                        description: Text(
-                                                          'Error: $e',
-                                                        ),
-                                                        autoCloseDuration:
-                                                            const Duration(
-                                                              seconds: 2,
-                                                            ),
-                                                      );
                                                     }
-                                                  }
-                                                },
-                                                verificationFailed: (e) {
-                                                  setDialogState(
-                                                    () =>
-                                                        isPhoneVerifying =
-                                                            false,
-                                                  );
+                                                  });
+                                                } catch (e, stackTrace) {
+                                                  debugPrint('Auto phone link error: $e\nStack: $stackTrace');
                                                   toastification.show(
                                                     context: dialogContext,
-                                                    type:
-                                                        ToastificationType
-                                                            .error,
-                                                    title: const Text(
-                                                      'Phone Verification Failed',
-                                                    ),
-                                                    description: Text(
-                                                      'Error: ${e.message}',
-                                                    ),
-                                                    autoCloseDuration:
-                                                        const Duration(
-                                                          seconds: 2,
-                                                        ),
+                                                    type: ToastificationType.error,
+                                                    title: const Text('Phone Link Error'),
+                                                    description: Text('Error: $e'),
+                                                    autoCloseDuration: const Duration(seconds: 2),
                                                   );
-                                                  debugPrint(
-                                                    'Phone verification failed: ${e.message}',
-                                                  );
-                                                },
-                                                codeSent: (verId, _) {
-                                                  setDialogState(() {
-                                                    verificationId = verId;
-                                                    isPhoneVerifying = false;
-                                                  });
-                                                  debugPrint(
-                                                    'Code sent to $phone, verificationId: $verId',
-                                                  );
-                                                },
-                                                codeAutoRetrievalTimeout:
-                                                    (_) {},
+                                                }
+                                              }
+                                            },
+                                            verificationFailed: (e) {
+                                              setDialogState(() {
+                                                isPhoneVerifying = false;
+                                                debugPrint('Phone verification failed: ${e.message}');
+                                              });
+                                              toastification.show(
+                                                context: dialogContext,
+                                                type: ToastificationType.error,
+                                                title: const Text('Phone Verification Failed'),
+                                                description: Text('Error: ${e.message}'),
+                                                autoCloseDuration: const Duration(seconds: 2),
                                               );
-                                        },
+                                            },
+                                            codeSent: (verId, _) {
+                                              setDialogState(() {
+                                                verificationId = verId;
+                                                isPhoneVerifying = false;
+                                                debugPrint('Code sent to $phone, verificationId: $verId');
+                                              });
+                                            },
+                                            codeAutoRetrievalTimeout: (_) {},
+                                          );
+                                        } catch (e, stackTrace) {
+                                          debugPrint('Phone verification error: $e\nStack: $stackTrace');
+                                          setDialogState(() {
+                                            isPhoneVerifying = false;
+                                          });
+                                        }
+                                      },
                               )
                             else
                               _buildModernButton(
-                                text:
-                                    isPhoneVerifying
-                                        ? 'Verifying...'
-                                        : 'Verify OTP',
-                                onPressed:
-                                    isPhoneVerifying
-                                        ? null
-                                        : () async {
-                                          final otp =
-                                              otpControllers
-                                                  .map((c) => c.text)
-                                                  .join();
-                                          if (otp.length != 6 ||
-                                              verificationId == null) {
-                                            toastification.show(
-                                              context: dialogContext,
-                                              type: ToastificationType.error,
-                                              title: const Text(
-                                                'Validation Error',
-                                              ),
-                                              description: const Text(
-                                                'Enter a valid 6-digit OTP',
-                                              ),
-                                              autoCloseDuration: const Duration(
-                                                seconds: 2,
-                                              ),
-                                            );
-                                            return;
-                                          }
-                                          setDialogState(
-                                            () => isPhoneVerifying = true,
+                                text: isPhoneVerifying ? 'Verifying...' : 'Verify OTP',
+                                onPressed: isPhoneVerifying
+                                    ? null
+                                    : () async {
+                                        if (isDialogClosing) return;
+                                        final otp = otpControllers.map((c) => c.text).join();
+                                        if (otp.length != 6 || verificationId == null) {
+                                          toastification.show(
+                                            context: dialogContext,
+                                            type: ToastificationType.error,
+                                            title: const Text('Validation Error'),
+                                            description: const Text('Enter a valid 6-digit OTP'),
+                                            autoCloseDuration: const Duration(seconds: 2),
                                           );
-                                          final credential = firebase_auth
-                                              .PhoneAuthProvider.credential(
+                                          return;
+                                        }
+                                        setDialogState(() {
+                                          isPhoneVerifying = true;
+                                          debugPrint('Verifying OTP at ${DateTime.now()}');
+                                        });
+                                        try {
+                                          final credential = firebase_auth.PhoneAuthProvider.credential(
                                             verificationId: verificationId!,
                                             smsCode: otp,
                                           );
-                                          try {
-                                            final user =
-                                                firebase_auth
-                                                    .FirebaseAuth
-                                                    .instance
-                                                    .currentUser;
-                                            if (user != null &&
-                                                !isDialogClosing) {
-                                              await user.linkWithCredential(
-                                                credential,
-                                              );
-                                              setDialogState(() {
-                                                _signupStep++;
-                                                debugPrint(
-                                                  'Phone linked, advanced to step $_signupStep',
-                                                );
-                                              });
-                                            }
-                                          } catch (e, stackTrace) {
-                                            debugPrint(
-                                              'OTP verification error: $e\nStack: $stackTrace',
-                                            );
-                                            toastification.show(
-                                              context: dialogContext,
-                                              type: ToastificationType.error,
-                                              title: const Text(
-                                                'OTP Verification Failed',
-                                              ),
-                                              description: Text('Error: $e'),
-                                              autoCloseDuration: const Duration(
-                                                seconds: 2,
-                                              ),
-                                            );
-                                          } finally {
-                                            setDialogState(
-                                              () => isPhoneVerifying = false,
-                                            );
-                                          }
-                                        },
-                              ),
-                          ] else if (_signupStep == 3) ...[
-                            Text(
-                              'Step 4: Select Gender',
-                              style: GoogleFonts.poppins(
-                                color: _textColor,
-                                fontWeight: FontWeight.bold,
-                                fontSize: 22,
-                              ),
-                            ),
-                            const SizedBox(height: 20),
-                            Column(
-                              children:
-                                  genders.map((gender) {
-                                    return Padding(
-                                      padding: const EdgeInsets.symmetric(
-                                        vertical: 8.0,
-                                      ),
-                                      child: ListTile(
-                                        title: Text(
-                                          gender,
-                                          style: GoogleFonts.poppins(
-                                            color: _textColor,
-                                          ),
-                                        ),
-                                        leading: Radio<String>(
-                                          value: gender,
-                                          groupValue: selectedGender,
-                                          onChanged: (String? value) {
-                                            setDialogState(() {
-                                              selectedGender = value;
+                                          final user = firebase_auth.FirebaseAuth.instance.currentUser;
+                                          if (user != null && !isDialogClosing) {
+                                            await user.linkWithCredential(credential);
+                                            WidgetsBinding.instance.addPostFrameCallback((_) {
+                                              if (mounted && !isDialogClosing) {
+                                                setDialogState(() {
+                                                  _signupStep++;
+                                                  debugPrint('Phone linked, advanced to step $_signupStep');
+                                                });
+                                              }
                                             });
-                                          },
-                                          fillColor:
-                                              MaterialStateProperty.resolveWith<
-                                                Color
-                                              >((Set<MaterialState> states) {
-                                                if (states.contains(
-                                                  MaterialState.selected,
-                                                )) {
-                                                  return _primaryColor;
-                                                }
-                                                return _textColor;
-                                              }),
-                                        ),
-                                        tileColor: _inputBackground,
-                                        shape: RoundedRectangleBorder(
-                                          borderRadius: BorderRadius.circular(
-                                            12,
-                                          ),
-                                        ),
-                                      ),
-                                    );
-                                  }).toList(),
+                                          }
+                                        } catch (e, stackTrace) {
+                                          debugPrint('OTP verification error: $e\nStack: $stackTrace');
+                                          toastification.show(
+                                            context: dialogContext,
+                                            type: ToastificationType.error,
+                                            title: const Text('OTP Verification Failed'),
+                                            description: Text('Error: $e'),
+                                            autoCloseDuration: const Duration(seconds: 2),
+                                          );
+                                        } finally {
+                                          setDialogState(() {
+                                            isPhoneVerifying = false;
+                                            debugPrint('OTP verification completed at ${DateTime.now()}');
+                                          });
+                                        }
+                                      },
+                              ),
+                          ]
+                        ] else if (_signupStep == 3) ...[
+                          Text(
+                            'Step 4: Select Gender',
+                            style: GoogleFonts.poppins(
+                              color: _textColor,
+                              fontWeight: FontWeight.bold,
+                              fontSize: 18,
                             ),
-                          ],
-                          const SizedBox(height: 20),
-                          Row(
-                            mainAxisAlignment: MainAxisAlignment.spaceEvenly,
-                            children: [
-                              if (_signupStep > 0)
-                                _buildModernButton(
+                            textAlign: TextAlign.center,
+                          ),
+                          const SizedBox(height: 12),
+                          Column(
+                            children: genders.map((gender) {
+                              return Padding(
+                                padding: const EdgeInsets.symmetric(vertical: 5.0),
+                                child: ListTile(
+                                  title: Text(
+                                    gender,
+                                    style: GoogleFonts.poppins(color: _textColor, fontSize: 14),
+                                  ),
+                                  leading: Radio<String>(
+                                    value: gender,
+                                    groupValue: selectedGender,
+                                    onChanged: (String? value) {
+                                      if (!isDialogClosing) {
+                                        setDialogState(() {
+                                          selectedGender = value;
+                                          debugPrint('Gender selected: $value at ${DateTime.now()}');
+                                        });
+                                      }
+                                    },
+                                    fillColor: MaterialStateProperty.resolveWith<Color>(
+                                      (Set<MaterialState> states) {
+                                        if (states.contains(MaterialState.selected)) {
+                                          return _primaryColor;
+                                        }
+                                        return _textColor;
+                                      },
+                                    ),
+                                  ),
+                                  tileColor: _inputBackground,
+                                  shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                                ),
+                              );
+                            }).toList(),
+                          ),
+                        ],
+                        const SizedBox(height: 12),
+                        Row(
+                          mainAxisAlignment: MainAxisAlignment.spaceEvenly,
+                          children: [
+                            if (_signupStep > 0)
+                              SizedBox(
+                                width: 100,
+                                child: _buildModernButton(
                                   text: 'Back',
                                   onPressed: () {
-                                    setDialogState(() {
-                                      if (_signupStep == 2) {
-                                        verificationId = null;
-                                        for (var controller in otpControllers) {
-                                          controller.clear();
-                                        }
+                                    if (isDialogClosing) return;
+                                    WidgetsBinding.instance.addPostFrameCallback((_) {
+                                      if (mounted && !isDialogClosing) {
+                                        setDialogState(() {
+                                          if (_signupStep == 2 && !isPhoneLogin) {
+                                            verificationId = null;
+                                            for (var controller in otpControllers) {
+                                              controller.clear();
+                                            }
+                                          }
+                                          _signupStep--;
+                                          debugPrint('Back to step $_signupStep at ${DateTime.now()}');
+                                        });
                                       }
-                                      _signupStep--;
-                                      if (_signupStep == 0 ||
-                                          _signupStep == 1) {
-                                        selectedGender = null;
-                                      }
-                                      debugPrint('Back to step $_signupStep');
                                     });
                                   },
                                 ),
-                              _buildModernButton(
+                              ),
+                            SizedBox(
+                              width: 100,
+                              child: _buildModernButton(
                                 text: _signupStep < 3 ? 'Next' : 'Complete',
                                 onPressed: () async {
                                   if (isDialogClosing) return;
+                                  debugPrint('Button pressed: ${_signupStep < 3 ? 'Next' : 'Complete'} at ${DateTime.now()}');
+                                  
                                   if (_signupStep < 3) {
-                                    if (_signupStep == 0 &&
-                                        selectedProfileImageIndex == null) {
+                                    if (_signupStep == 0 && selectedProfileImageIndex == null) {
                                       toastification.show(
                                         context: dialogContext,
                                         type: ToastificationType.error,
                                         title: const Text('Validation Error'),
-                                        description: const Text(
-                                          'Please select a profile image',
-                                        ),
-                                        autoCloseDuration: const Duration(
-                                          seconds: 2,
-                                        ),
+                                        description: const Text('Please select a profile image'),
+                                        autoCloseDuration: const Duration(seconds: 2),
                                       );
                                       return;
                                     } else if (_signupStep == 1 &&
-                                        (firstNameController.text.isEmpty ||
-                                            lastNameController.text.isEmpty)) {
+                                        (firstNameController.text.trim().isEmpty ||
+                                            lastNameController.text.trim().isEmpty)) {
                                       toastification.show(
                                         context: dialogContext,
                                         type: ToastificationType.error,
                                         title: const Text('Validation Error'),
-                                        description: const Text(
-                                          'Please fill all required fields',
-                                        ),
-                                        autoCloseDuration: const Duration(
-                                          seconds: 2,
-                                        ),
+                                        description: const Text('Please fill all required fields'),
+                                        autoCloseDuration: const Duration(seconds: 2),
                                       );
                                       return;
-                                    } else if (_signupStep == 2 &&
-                                        phoneController.text.trim().isEmpty) {
-                                      setDialogState(() {
-                                        _signupStep++;
-                                        debugPrint(
-                                          'No phone provided, skipping to step $_signupStep',
-                                        );
+                                    } else if (_signupStep == 2 && isPhoneLogin) {
+                                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                                        if (mounted && !isDialogClosing) {
+                                          setDialogState(() {
+                                            _signupStep++;
+                                            debugPrint('Phone login user, skipping to step $_signupStep');
+                                          });
+                                        }
                                       });
                                     } else {
-                                      setDialogState(() {
-                                        _signupStep++;
-                                        debugPrint(
-                                          'Advanced to step $_signupStep',
-                                        );
+                                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                                        if (mounted && !isDialogClosing) {
+                                          setDialogState(() {
+                                            _signupStep++;
+                                            debugPrint('Advanced to step $_signupStep at ${DateTime.now()}');
+                                          });
+                                        }
                                       });
                                     }
                                   } else {
@@ -980,83 +969,66 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                                         context: dialogContext,
                                         type: ToastificationType.error,
                                         title: const Text('Validation Error'),
-                                        description: const Text(
-                                          'Please select your gender',
-                                        ),
-                                        autoCloseDuration: const Duration(
-                                          seconds: 2,
-                                        ),
+                                        description: const Text('Please select your gender'),
+                                        autoCloseDuration: const Duration(seconds: 2),
                                       );
                                       return;
                                     }
                                     try {
                                       isDialogClosing = true;
-                                      final location =
-                                          await _fetchUserLocation();
-                                      await FirebaseFirestore.instance
-                                          .collection('users')
-                                          .doc(uid)
-                                          .set({
-                                            'email':
-                                                _emailController.text.trim(),
-                                            'firstName':
-                                                firstNameController.text.trim(),
-                                            'lastName':
-                                                lastNameController.text.trim(),
-                                            'phone':
-                                                phoneController.text.isEmpty
-                                                    ? ''
-                                                    : _normalizePhoneNumber(
-                                                      phoneController.text
-                                                          .trim(),
-                                                    ),
-                                            'gender': selectedGender,
-                                            'profileImage':
-                                                profileImages[selectedProfileImageIndex!],
-                                            'location': location,
-                                            'createdAt':
-                                                FieldValue.serverTimestamp(),
-                                            'role': widget.role ?? 'player',
-                                          }, SetOptions(merge: true));
-                                      debugPrint(
-                                        'User details saved for UID: $uid',
-                                      );
-                                      Navigator.pop(dialogContext);
-                                      if (mounted) {
-                                        _authBloc!.add(
-                                          AuthRefreshProfileEvent(uid),
-                                        );
-                                        _navigateBasedOnRole(uid);
-                                      }
+                                      debugPrint('Saving profile for UID: $uid at ${DateTime.now()}');
+                                      
+                                      final String phoneToSave = isPhoneLogin 
+                                          ? userPhone 
+                                          : (phoneController.text.isEmpty ? '' : _normalizePhoneNumber(phoneController.text.trim()));
+                                      
+                                      await FirebaseFirestore.instance.collection('users').doc(uid).set({
+                                        'email': _emailController.text.trim(),
+                                        'firstName': firstNameController.text.trim(),
+                                        'lastName': lastNameController.text.trim(),
+                                        'phone': phoneToSave,
+                                        'gender': selectedGender,
+                                        'profileImage': profileImages[selectedProfileImageIndex!],
+                                        'location': await _fetchUserLocation(),
+                                        'createdAt': FieldValue.serverTimestamp(),
+                                        'role': widget.role ?? 'player',
+                                        'isProfileComplete': true,
+                                      }, SetOptions(merge: true));
+                                      
+                                      debugPrint('User details saved for UID: $uid at ${DateTime.now()}');
+                                      WidgetsBinding.instance.addPostFrameCallback((_) {
+                                        if (mounted) {
+                                          debugPrint('Closing dialog for UID: $uid at ${DateTime.now()}');
+                                          Navigator.pop(dialogContext);
+                                          _authBloc?.add(AuthRefreshProfileEvent(uid));
+                                          completer.complete();
+                                        }
+                                      });
                                     } catch (e, stackTrace) {
-                                      debugPrint(
-                                        'Error saving profile: $e\n$stackTrace',
-                                      );
+                                      debugPrint('Error saving profile: $e\nStack: $stackTrace');
                                       isDialogClosing = false;
                                       toastification.show(
                                         context: dialogContext,
                                         type: ToastificationType.error,
                                         title: const Text('Error'),
-                                        description: Text(
-                                          'Failed to save profile: $e',
-                                        ),
-                                        autoCloseDuration: const Duration(
-                                          seconds: 2,
-                                        ),
+                                        description: Text('Failed to save profile: $e'),
+                                        autoCloseDuration: const Duration(seconds: 2),
                                       );
                                     }
                                   }
                                 },
                               ),
-                            ],
-                          ),
-                        ],
-                      ),
+                            ),
+                          ],
+                        ),
+                      ],
                     ),
                   ),
-                );
-              },
-            ),
+                ),
+              ),
+            );
+          },
+        ),
       );
     } catch (e, stackTrace) {
       debugPrint('collectMissingDetails error: $e\nStack: $stackTrace');
@@ -1069,6 +1041,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
           autoCloseDuration: const Duration(seconds: 2),
         );
       }
+      completer.complete();
     } finally {
       firstNameController.dispose();
       lastNameController.dispose();
@@ -1079,7 +1052,10 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
       if (mounted) {
         setState(() => _isDialogOpen = false);
       }
-      debugPrint('Dialog closed for UID: $uid');
+      debugPrint('Dialog closed for UID: $uid at ${DateTime.now()}');
+      if (!completer.isCompleted) {
+        completer.complete();
+      }
     }
   }
 
@@ -1105,9 +1081,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
       Position position = await Geolocator.getCurrentPosition(
         desiredAccuracy: LocationAccuracy.medium,
       );
-      debugPrint(
-        'Location fetched: ${position.latitude}, ${position.longitude}',
-      );
+      debugPrint('Location fetched: ${position.latitude}, ${position.longitude}');
       return {'latitude': position.latitude, 'longitude': position.longitude};
     } catch (e, stackTrace) {
       debugPrint('Failed to fetch location: $e\nStack: $stackTrace');
@@ -1122,18 +1096,12 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
           .collection('users')
           .doc(uid)
           .get()
-          .timeout(
-            const Duration(seconds: 10),
-            onTimeout: () {
-              debugPrint('Firestore user doc fetch timed out for UID: $uid');
-              throw Exception('Firestore query timed out');
-            },
-          );
+          .timeout(const Duration(seconds: 10));
       if (!userDoc.exists) {
-        debugPrint(
-          'User document not found for UID: $uid, triggering profile creation',
-        );
-        await _collectMissingDetails(context, uid);
+        debugPrint('User document not found for UID: $uid, triggering profile creation');
+        final completer = Completer<void>();
+        await _collectMissingDetails(context, uid, completer);
+        await completer.future;
         return;
       }
 
@@ -1143,9 +1111,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
 
       if (mounted) {
         debugPrint('Navigating to /$role for UID: $uid');
-        Navigator.of(
-          context,
-        ).pushNamedAndRemoveUntil('/$role', (route) => false);
+        Navigator.of(context).pushNamedAndRemoveUntil('/$role', (route) => false);
       } else {
         debugPrint('Widget not mounted, skipping navigation for UID: $uid');
       }
@@ -1166,14 +1132,11 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
 
   Future<void> _handleLoginButtonPress() async {
     debugPrint('=== LOGIN BUTTON PRESSED ===');
-    debugPrint('usePhone: $_usePhone, isLoading: $_isLoading, mounted: $mounted');
-
     if (!mounted || _isLoading || _authBloc == null) {
       debugPrint('Cannot proceed: mounted=$mounted, isLoading=$_isLoading, authBloc=$_authBloc');
       return;
     }
 
-    // Set loading state AFTER all checks
     setState(() => _isLoading = true);
 
     try {
@@ -1199,28 +1162,11 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
 
   Future<void> _handlePhoneLogin() async {
     debugPrint('=== PHONE LOGIN STARTED ===');
-    debugPrint('mounted: $mounted, isLoading: $_isLoading, authBloc: $_authBloc, showOtpField: $_showOtpField');
-
-    // Only check for critical errors, not isLoading
-    if (!mounted) {
-      debugPrint('Widget not mounted, aborting phone login');
-      return;
-    }
-
-    if (_authBloc == null) {
-      debugPrint('AuthBloc is null, aborting phone login');
+    if (!mounted || _authBloc == null) {
+      debugPrint('Cannot proceed: mounted=$mounted, authBloc=$_authBloc');
       setState(() => _isLoading = false);
-      toastification.show(
-        context: context,
-        type: ToastificationType.error,
-        title: const Text('System Error'),
-        description: const Text('Authentication service not available'),
-        autoCloseDuration: const Duration(seconds: 3),
-      );
       return;
     }
-
-    debugPrint('Phone login processing started');
 
     try {
       if (!_showOtpField) {
@@ -1340,7 +1286,6 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
       return;
     }
 
-    // Check if phone exists in database
     try {
       final isPhoneUnique = await FirebaseFirestore.instance
           .collection('users')
@@ -1376,7 +1321,6 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
       return;
     }
 
-    // Send OTP
     try {
       await firebase_auth.FirebaseAuth.instance.verifyPhoneNumber(
         phoneNumber: phone,
@@ -1387,7 +1331,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
             final userCredential = await firebase_auth.FirebaseAuth.instance.signInWithCredential(credential);
             if (mounted) {
               setState(() => _isLoading = false);
-              await _checkAndCompleteMissingDetails(userCredential.user!.uid);
+              await _checkAndCompleteMissingDetails(context, userCredential.user!.uid);
             }
           } catch (e) {
             debugPrint('Auto-verification sign-in error: $e');
@@ -1477,7 +1421,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
 
       if (mounted) {
         setState(() => _isLoading = false);
-        await _checkAndCompleteMissingDetails(userCredential.user!.uid);
+        await _checkAndCompleteMissingDetails(context, userCredential.user!.uid);
       }
     } catch (e) {
       debugPrint('OTP verification error: $e');
@@ -1526,6 +1470,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
     return Row(
       children: [
         Container(
+          width: 120,
           decoration: BoxDecoration(
             color: _inputBackground,
             borderRadius: const BorderRadius.only(
@@ -1547,12 +1492,12 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
             alignLeft: false,
             textStyle: GoogleFonts.poppins(
               color: _textColor,
-              fontSize: 16,
+              fontSize: 14,
               fontWeight: FontWeight.w500,
             ),
             dialogTextStyle: GoogleFonts.poppins(
               color: _textColor,
-              fontSize: 16,
+              fontSize: 14,
             ),
             searchDecoration: InputDecoration(
               hintText: 'Search country...',
@@ -1563,11 +1508,10 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
             ),
             dialogBackgroundColor: _darkBackground,
             backgroundColor: Colors.transparent,
-            flagWidth: 25,
-            padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+            flagWidth: 20,
+            padding: const EdgeInsets.symmetric(horizontal: 8, vertical: 12),
           ),
         ),
-        const SizedBox(width: 1),
         Expanded(
           child: TextField(
             controller: _phoneController,
@@ -1590,9 +1534,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                   topRight: Radius.circular(12),
                   bottomRight: Radius.circular(12),
                 ),
-                borderSide: BorderSide(
-                  color: _secondaryTextColor.withOpacity(0.2),
-                ),
+                borderSide: BorderSide(color: _secondaryTextColor.withOpacity(0.2)),
               ),
               focusedBorder: OutlineInputBorder(
                 borderRadius: const BorderRadius.only(
@@ -1629,33 +1571,30 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
         filled: true,
         fillColor: _inputBackground,
         border: OutlineInputBorder(
-          borderRadius:
-              isPhone
-                  ? const BorderRadius.only(
-                    topRight: Radius.circular(12),
-                    bottomRight: Radius.circular(12),
-                  )
-                  : BorderRadius.circular(12),
+          borderRadius: isPhone
+              ? const BorderRadius.only(
+                  topRight: Radius.circular(12),
+                  bottomRight: Radius.circular(12),
+                )
+              : BorderRadius.circular(12),
           borderSide: BorderSide.none,
         ),
         enabledBorder: OutlineInputBorder(
-          borderRadius:
-              isPhone
-                  ? const BorderRadius.only(
-                    topRight: Radius.circular(12),
-                    bottomRight: Radius.circular(12),
-                  )
-                  : BorderRadius.circular(12),
+          borderRadius: isPhone
+              ? const BorderRadius.only(
+                  topRight: Radius.circular(12),
+                  bottomRight: Radius.circular(12),
+                )
+              : BorderRadius.circular(12),
           borderSide: BorderSide(color: _secondaryTextColor.withOpacity(0.2)),
         ),
         focusedBorder: OutlineInputBorder(
-          borderRadius:
-              isPhone
-                  ? const BorderRadius.only(
-                    topRight: Radius.circular(12),
-                    bottomRight: Radius.circular(12),
-                  )
-                  : BorderRadius.circular(12),
+          borderRadius: isPhone
+              ? const BorderRadius.only(
+                  topRight: Radius.circular(12),
+                  bottomRight: Radius.circular(12),
+                )
+              : BorderRadius.circular(12),
           borderSide: BorderSide(color: _primaryColor, width: 2),
         ),
         prefixIcon: Icon(icon, color: _secondaryTextColor),
@@ -1665,24 +1604,19 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
   }
 
   Widget _buildOtpFields(List<TextEditingController> controllers) {
-    if (controllers.length != 6) {
-      debugPrint('OTP controllers list is invalid, reinitializing');
-      controllers.clear();
-      controllers.addAll(List.generate(6, (_) => TextEditingController()));
-    }
-
     return Row(
       mainAxisAlignment: MainAxisAlignment.spaceEvenly,
       children: List.generate(6, (index) {
         return SizedBox(
-          width: 50,
+          width: 48,
+          height: 48,
           child: TextField(
             controller: controllers[index],
             keyboardType: TextInputType.number,
             textAlign: TextAlign.center,
             style: GoogleFonts.poppins(
               color: _textColor,
-              fontSize: 24,
+              fontSize: 20,
               fontWeight: FontWeight.w600,
             ),
             maxLength: 1,
@@ -1691,17 +1625,15 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
               filled: true,
               fillColor: _inputBackground,
               border: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(10),
                 borderSide: BorderSide.none,
               ),
               enabledBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
-                borderSide: BorderSide(
-                  color: _secondaryTextColor.withOpacity(0.2),
-                ),
+                borderRadius: BorderRadius.circular(10),
+                borderSide: BorderSide(color: _secondaryTextColor.withOpacity(0.2)),
               ),
               focusedBorder: OutlineInputBorder(
-                borderRadius: BorderRadius.circular(12),
+                borderRadius: BorderRadius.circular(10),
                 borderSide: BorderSide(color: _primaryColor, width: 2),
               ),
             ),
@@ -1741,29 +1673,28 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
         style: ElevatedButton.styleFrom(
           backgroundColor: Colors.transparent,
           shadowColor: Colors.transparent,
-          padding: const EdgeInsets.symmetric(vertical: 16),
+          padding: const EdgeInsets.symmetric(vertical: 14),
           shape: RoundedRectangleBorder(
             borderRadius: BorderRadius.circular(12),
           ),
         ),
-        child:
-            isLoading
-                ? const SizedBox(
-                  width: 20,
-                  height: 20,
-                  child: CircularProgressIndicator(
-                    strokeWidth: 2,
-                    color: Colors.white,
-                  ),
-                )
-                : Text(
-                  text,
-                  style: GoogleFonts.poppins(
-                    color: _textColor,
-                    fontWeight: FontWeight.w600,
-                    fontSize: 16,
-                  ),
+        child: isLoading
+            ? const SizedBox(
+                width: 20,
+                height: 20,
+                child: CircularProgressIndicator(
+                  strokeWidth: 2,
+                  color: Colors.white,
                 ),
+              )
+            : Text(
+                text,
+                style: GoogleFonts.poppins(
+                  color: _textColor,
+                  fontWeight: FontWeight.w600,
+                  fontSize: 16,
+                ),
+              ),
       ),
     );
   }
@@ -1795,10 +1726,11 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
 
   Widget _buildStepIndicator(int stepNumber, String label) {
     return Column(
+      mainAxisSize: MainAxisSize.min,
       children: [
         Container(
-          width: 25,
-          height: 25,
+          width: 20,
+          height: 20,
           decoration: BoxDecoration(
             shape: BoxShape.circle,
             color: _signupStep == stepNumber ? Colors.cyanAccent : Colors.grey,
@@ -1809,16 +1741,18 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
               style: GoogleFonts.poppins(
                 color: Colors.white,
                 fontWeight: FontWeight.bold,
+                fontSize: 10,
               ),
             ),
           ),
         ),
-        const SizedBox(height: 2),
+        const SizedBox(height: 4),
         Text(
           label,
+          textAlign: TextAlign.center,
           style: GoogleFonts.poppins(
             color: Colors.white,
-            fontSize: 12,
+            fontSize: 8,
             fontWeight: FontWeight.w500,
           ),
         ),
@@ -1828,10 +1762,9 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
 
   Widget _buildStepConnector() {
     return Container(
-      width: 30,
+      width: 20,
       height: 2,
       color: Colors.grey,
-      margin: const EdgeInsets.symmetric(horizontal: 4),
     );
   }
 
@@ -1846,7 +1779,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
           } else if (state is AuthAuthenticated) {
             debugPrint('Authenticated with UID: ${state.user.uid}');
             setState(() => _isLoading = false);
-            await _checkAndCompleteMissingDetails(state.user.uid);
+            await _checkAndCompleteMissingDetails(context, state.user.uid);
           } else if (state is AuthError) {
             debugPrint('Auth error: ${state.message}');
             if (mounted) {
@@ -1867,15 +1800,14 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
         },
         child: SafeArea(
           child: SingleChildScrollView(
-            padding: const EdgeInsets.all(24.0),
+            padding: const EdgeInsets.all(20.0),
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
               children: [
                 _buildBackButton(),
-                const SizedBox(height: 20),
-
+                const SizedBox(height: 16),
                 _buildHeader(),
-                const SizedBox(height: 40),
+                const SizedBox(height: 32),
                 Center(
                   child: ToggleButtons(
                     isSelected: _authModeSelection,
@@ -1896,27 +1828,21 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                     selectedBorderColor: _primaryColor,
                     children: [
                       Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 24,
-                          vertical: 12,
-                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
                         child: Text(
                           'Email',
                           style: GoogleFonts.poppins(
-                            fontSize: 16,
+                            fontSize: 14,
                             color: _textColor,
                           ),
                         ),
                       ),
                       Padding(
-                        padding: const EdgeInsets.symmetric(
-                          horizontal: 24,
-                          vertical: 12,
-                        ),
+                        padding: const EdgeInsets.symmetric(horizontal: 20, vertical: 10),
                         child: Text(
                           'Phone',
                           style: GoogleFonts.poppins(
-                            fontSize: 16,
+                            fontSize: 14,
                             color: _textColor,
                           ),
                         ),
@@ -1924,14 +1850,14 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                     ],
                   ),
                 ),
-                const SizedBox(height: 24),
+                const SizedBox(height: 20),
                 if (!_usePhone) ...[
                   _buildModernTextField(
                     controller: _emailController,
                     label: 'Email',
                     icon: Icons.email,
                   ),
-                  const SizedBox(height: 16),
+                  const SizedBox(height: 12),
                   _buildModernTextField(
                     controller: _passwordController,
                     label: 'Password',
@@ -1939,18 +1865,13 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                     obscureText: _obscurePassword,
                     suffixIcon: IconButton(
                       icon: Icon(
-                        _obscurePassword
-                            ? Icons.visibility
-                            : Icons.visibility_off,
+                        _obscurePassword ? Icons.visibility : Icons.visibility_off,
                         color: _secondaryTextColor,
                       ),
-                      onPressed:
-                          () => setState(
-                            () => _obscurePassword = !_obscurePassword,
-                          ),
+                      onPressed: () => setState(() => _obscurePassword = !_obscurePassword),
                     ),
                   ),
-                  const SizedBox(height: 12),
+                  const SizedBox(height: 10),
                   Align(
                     alignment: Alignment.centerRight,
                     child: TextButton(
@@ -1959,7 +1880,7 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                         'Forgot Password?',
                         style: GoogleFonts.poppins(
                           color: _primaryColor,
-                          fontSize: 14,
+                          fontSize: 12,
                         ),
                       ),
                     ),
@@ -1971,19 +1892,17 @@ class _LoginPageState extends State<LoginPage> with TickerProviderStateMixin {
                     _buildOtpFields(_otpControllers),
                   ],
                 ],
-                const SizedBox(height: 24),
+                const SizedBox(height: 20),
                 _buildModernButton(
-                  text:
-                      _isLoading
-                          ? 'Processing...'
-                          : _usePhone && _showOtpField
+                  text: _isLoading
+                      ? 'Processing...'
+                      : _usePhone && _showOtpField
                           ? 'Verify OTP'
                           : 'Log In',
                   onPressed: _isLoading ? null : _handleLoginButtonPress,
                   isLoading: _isLoading,
                 ),
-                const SizedBox(height: 24),
-
+                const SizedBox(height: 20),
                 _buildSignupPrompt(),
               ],
             ),

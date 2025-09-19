@@ -48,6 +48,42 @@
           ]
         }
       }
+    },
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:427126638951:android:e6be474e4cff7558ca47c2",
+        "android_client_info": {
+          "package_name": "com.smashlive.gameapp"
+        }
+      },
+      "oauth_client": [
+        {
+          "client_id": "427126638951-3ofv1odq0e660lge9n2f8n8de8uj4u69.apps.googleusercontent.com",
+          "client_type": 3
+        }
+      ],
+      "api_key": [
+        {
+          "current_key": "AIzaSyDMPRkvSHRjQSxOirhf2Az0KZuFdtZfB5U"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": [
+            {
+              "client_id": "427126638951-3ofv1odq0e660lge9n2f8n8de8uj4u69.apps.googleusercontent.com",
+              "client_type": 3
+            },
+            {
+              "client_id": "427126638951-es7icvgb93edbfjfv1cucbd8b2rqmpc7.apps.googleusercontent.com",
+              "client_type": 2,
+              "ios_info": {
+                "bundle_id": "com.smashlive.gameapp"
+              }
+            }
+          ]
+        }
+      }
     }
   ],
   "configuration_version": "1"

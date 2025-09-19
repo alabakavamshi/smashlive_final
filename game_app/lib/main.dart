@@ -1,5 +1,6 @@
 import 'package:firebase_app_check/firebase_app_check.dart';
 import 'package:firebase_core/firebase_core.dart';
+import 'package:firebase_storage/firebase_storage.dart';
 import 'package:flutter/material.dart';
 import 'package:flutter/services.dart';
 import 'package:flutter_bloc/flutter_bloc.dart';
@@ -17,11 +18,22 @@ import 'package:game_app/umpire/umpirehomepage.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:geolocator/geolocator.dart';
 import 'package:timezone/data/latest.dart' as tz;
+import 'package:flutter_dotenv/flutter_dotenv.dart';
 
 void main() async {
+   await dotenv.load(fileName: ".env");
   WidgetsFlutterBinding.ensureInitialized();
   SystemChrome.setEnabledSystemUIMode(SystemUiMode.edgeToEdge);
   tz.initializeTimeZones();
+   try {
+    final storage = FirebaseStorage.instance;
+    final ref = storage.ref().child('test_connection.txt');
+    await ref.putString('test', metadata: SettableMetadata(contentType: 'text/plain'));
+    await ref.delete();
+    debugPrint('✅ Firebase Storage connection test passed');
+  } catch (e) {
+    debugPrint('❌ Firebase Storage connection failed: $e');
+  }
   SystemChrome.setSystemUIOverlayStyle(
     const SystemUiOverlayStyle(
       statusBarColor: Colors.transparent,

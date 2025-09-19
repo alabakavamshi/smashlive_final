@@ -52,11 +52,6 @@ class HostedTournamentsPage extends StatelessWidget {
   }
 
   String _getTournamentStatus(Tournament tournament) {
-    if (tournament.endDate == null) {
-      return 'Date not set';
-    }
-
-    // Get timezone location, default to Asia/Kolkata if invalid
     tz.Location tzLocation;
     try {
       tzLocation = tz.getLocation(tournament.timezone);
@@ -67,7 +62,7 @@ class HostedTournamentsPage extends StatelessWidget {
 
     final now = tz.TZDateTime.now(tzLocation);
     final startDate = tz.TZDateTime.from(tournament.startDate, tzLocation);
-    final endDate = tz.TZDateTime.from(tournament.endDate!, tzLocation);
+    final endDate = tz.TZDateTime.from(tournament.endDate, tzLocation);
 
     if (now.isBefore(startDate)) {
       return 'Upcoming';
@@ -79,20 +74,20 @@ class HostedTournamentsPage extends StatelessWidget {
   }
 
   bool _isWithdrawDeadlinePassed(Tournament tournament) {
-    tz.Location tzLocation;
-    try {
-      tzLocation = tz.getLocation(tournament.timezone);
-    } catch (e) {
-      debugPrint('Invalid timezone for withdraw check: ${tournament.timezone}, defaulting to Asia/Kolkata');
-      tzLocation = tz.getLocation('Asia/Kolkata');
-    }
-
-    final now = tz.TZDateTime.now(tzLocation);
-    final startDate = tz.TZDateTime.from(tournament.startDate, tzLocation);
-    final withdrawDeadline = startDate.subtract(const Duration(days: 3));
-    return now.isAfter(withdrawDeadline);
+  tz.Location tzLocation;
+  try {
+    tzLocation = tz.getLocation(tournament.timezone);
+  } catch (e) {
+    debugPrint('Invalid timezone for withdraw check: ${tournament.timezone}, defaulting to Asia/Kolkata');
+    tzLocation = tz.getLocation('Asia/Kolkata');
   }
 
+  final now = tz.TZDateTime.now(tzLocation);
+  final registrationEnd = tz.TZDateTime.from(tournament.registrationEnd, tzLocation);
+  
+  // Withdrawal deadline is passed once registration end date/time has passed
+  return now.isAfter(registrationEnd);
+}
   Color _getStatusColor(String status) {
     switch (status) {
       case 'Upcoming':
