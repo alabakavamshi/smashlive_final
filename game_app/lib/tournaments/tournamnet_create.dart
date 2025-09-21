@@ -82,6 +82,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
   OverlayEntry? _overlayEntry;
   List<String> _citySuggestions = [];
   final String _googlePlacesApiKey = dotenv.get('GOOGLE_PLACES_API_KEY');
+  late TextEditingController _timezoneSearchController;
 
   static const Map<String, String> _cityToTimezone = {
     // North America
@@ -184,12 +185,40 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     'algiers': 'Africa/Algiers',
   };
 
+  static const Map<String, String> _timezoneAliases = {
+    'utc': 'UTC',
+    'gmt': 'Europe/London',
+    'bst': 'Europe/London',
+    'est': 'America/New_York',
+    'edt': 'America/New_York',
+    'cst': 'America/Chicago',
+    'cdt': 'America/Chicago',
+    'mst': 'America/Denver',
+    'mdt': 'America/Denver',
+    'pst': 'America/Los_Angeles',
+    'pdt': 'America/Los_Angeles',
+    'akst': 'America/Anchorage',
+    'hst': 'Pacific/Honolulu',
+    'ist': 'Asia/Kolkata',
+    'jst': 'Asia/Tokyo',
+    'kst': 'Asia/Seoul',
+    'cst china': 'Asia/Shanghai',
+    'aest': 'Australia/Sydney',
+    'aedt': 'Australia/Sydney',
+    'acst': 'Australia/Adelaide',
+    'awst': 'Australia/Perth',
+    'nzst': 'Pacific/Auckland',
+    'cet': 'Europe/Paris',
+    'cest': 'Europe/Paris',
+    'eet': 'Europe/Helsinki',
+    'msk': 'Europe/Moscow',
+  };
+
   final List<String> _allTimezones = tz.timeZoneDatabase.locations.keys.toList()
     ..sort((a, b) => a.compareTo(b));
 
+  final FocusNode _timezoneFocusNode = FocusNode();
   bool _showTimezoneDropdown = false;
-  final LayerLink _timezoneLayerLink = LayerLink();
-  OverlayEntry? _timezoneOverlayEntry;
 
   @override
   void initState() {
@@ -199,10 +228,11 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     _initLocationServices();
     tz.initializeTimeZones();
 
-    _cityFocusNode.addListener(() {
-      if (!_cityFocusNode.hasFocus) {
-        _removeOverlay();
-      }
+    _cityFocusNode.addListener(_onCityFocusChanged);
+    _timezoneFocusNode.addListener(_onTimezoneFocusChanged);
+    _timezoneSearchController = TextEditingController();
+    _timezoneSearchController.addListener(() {
+      setState(() {});
     });
   }
 
@@ -216,16 +246,29 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
 ''';
   }
 
-  void _removeOverlay() {
-    if (_overlayEntry != null) {
-      try {
-        _overlayEntry?.remove();
-      } catch (e) {
-        print('Error removing overlay: $e');
-      } finally {
-        _overlayEntry = null;
-      }
+  void _onCityFocusChanged() {
+    if (!_cityFocusNode.hasFocus && _citySuggestions.isNotEmpty) {
+      // Delay removal to allow tap to work
+      Future.delayed(const Duration(milliseconds: 150), () {
+        if (!_cityFocusNode.hasFocus) {
+          _removeOverlay();
+        }
+      });
     }
+  }
+
+  void _onTimezoneFocusChanged() {
+    if (!_timezoneFocusNode.hasFocus) {
+      _hideTimezoneDropdown();
+    }
+  }
+
+  void _removeOverlay() {
+    _overlayEntry?.remove();
+    _overlayEntry = null;
+    setState(() {
+      _citySuggestions = [];
+    });
   }
 
   Future<void> _fetchCitySuggestions(String query) async {
@@ -263,7 +306,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
             _isFetchingSuggestions = false;
           });
 
-          if (_citySuggestions.isNotEmpty && context.mounted) {
+          if (_citySuggestions.isNotEmpty && context.mounted && _cityFocusNode.hasFocus) {
             final renderBox = context.findRenderObject() as RenderBox?;
             if (renderBox != null) {
               _showSuggestionsOverlay(_citySuggestions, context, renderBox);
@@ -314,7 +357,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
         _isFetchingSuggestions = false;
       });
 
-      if (_citySuggestions.isNotEmpty && context.mounted) {
+      if (_citySuggestions.isNotEmpty && context.mounted && _cityFocusNode.hasFocus) {
         final renderBox = context.findRenderObject() as RenderBox?;
         if (renderBox != null) {
           _showSuggestionsOverlay(_citySuggestions, context, renderBox);
@@ -333,7 +376,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
   void _showSuggestionsOverlay(List<String> suggestions, BuildContext context, RenderBox renderBox) {
     _removeOverlay();
 
-    if (!context.mounted) return;
+    if (!context.mounted || !_cityFocusNode.hasFocus) return;
 
     final width = renderBox.size.width;
     final offset = renderBox.localToGlobal(Offset.zero);
@@ -375,14 +418,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
                     ),
                   ),
                   onTap: () {
-                    setState(() {
-                      _cityController.text = city;
-                      _isCityValid = true;
-                      _selectedTimezone = _getTimezoneForCity(city.toLowerCase());
-                    });
-                    _validateCityWithGeocoding(city);
-                    _removeOverlay();
-                    _cityFocusNode.unfocus();
+                    _handleCitySelection(city);
                   },
                 );
               },
@@ -392,9 +428,24 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
       ),
     );
 
-    if (context.mounted) {
-      Overlay.of(context).insert(_overlayEntry!);
-    }
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      if (context.mounted && _overlayEntry != null) {
+        Overlay.of(context).insert(_overlayEntry!);
+      }
+    });
+  }
+
+  void _handleCitySelection(String city) {
+    setState(() {
+      _cityController.text = city;
+      _isCityValid = true;
+      _selectedTimezone = _getTimezoneForCity(city.toLowerCase());
+      _citySuggestions = []; // Clear suggestions immediately
+    });
+    
+    _validateCityWithGeocoding(city);
+    _removeOverlay();
+    _cityFocusNode.unfocus();
   }
 
   Future<void> _validateCityWithGeocoding(String city) async {
@@ -667,6 +718,8 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     _contactNumberController.dispose();
     _animationController.dispose();
     _cityFocusNode.dispose();
+    _timezoneFocusNode.dispose();
+    _timezoneSearchController.dispose();
     _removeOverlay();
     _hideTimezoneDropdown();
     super.dispose();
@@ -727,14 +780,12 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
             tz.getLocation(timezoneName);
             setState(() {
               _fetchedCity = city;
-              _cityController.text = city;
               _isCityValid = true;
               _selectedTimezone = timezoneName;
             });
           } catch (e) {
             setState(() {
               _fetchedCity = city;
-              _cityController.text = city;
               _isCityValid = true;
               _selectedTimezone = 'UTC';
             });
@@ -1124,7 +1175,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
                                   _buildTextField(
                                     controller: _contactNameController,
                                     label: 'Contact Name',
-                                    hintText: 'e.g., John Doe',
+                                   
                                     icon: Icons.person,
                                     isRequired: true,
                                     validator: (value) => value == null || value.trim().isEmpty ? 'Enter a contact name' : null,
@@ -1133,7 +1184,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
                                   _buildTextField(
                                     controller: _contactNumberController,
                                     label: 'Contact Number',
-                                    hintText: 'e.g., +1234567890',
+                                  
                                     icon: Icons.phone,
                                     keyboardType: TextInputType.phone,
                                     isRequired: true,
@@ -1500,6 +1551,44 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
             validator: _validateCity,
           ),
         ),
+        if (_citySuggestions.isNotEmpty)
+          Container(
+            margin: const EdgeInsets.only(top: 4),
+            decoration: BoxDecoration(
+              color: secondaryColor,
+              borderRadius: BorderRadius.circular(8),
+              boxShadow: [
+                BoxShadow(
+                  color: Colors.black.withOpacity(0.1),
+                  blurRadius: 8,
+                  offset: const Offset(0, 4),
+                ),
+              ],
+            ),
+            child: ListView.builder(
+              shrinkWrap: true,
+              padding: EdgeInsets.zero,
+              itemCount: _citySuggestions.length,
+              itemBuilder: (context, index) {
+                final city = _citySuggestions[index];
+                return ListTile(
+                  dense: true,
+                  contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                  title: Text(
+                    city,
+                    style: GoogleFonts.poppins(
+                      color: textPrimary,
+                      fontSize: 14,
+                      fontWeight: FontWeight.w500,
+                    ),
+                  ),
+                  onTap: () {
+                    _handleCitySelection(city);
+                  },
+                );
+              },
+            ),
+          ),
         if (!_isFetchingLocation)
           Align(
             alignment: Alignment.centerRight,
@@ -1533,126 +1622,147 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     );
   }
 
-  Widget _buildTimezoneSelector() {
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        _buildRequiredLabel('Timezone', isRequired: false),
-        const SizedBox(height: 8),
-        CompositedTransformTarget(
-          link: _timezoneLayerLink,
-          child: GestureDetector(
-            onTap: () => _toggleTimezoneDropdown(),
-            child: Container(
-              decoration: BoxDecoration(
-                borderRadius: BorderRadius.circular(12),
-                color: secondaryColor,
-                border: Border.all(color: borderColor, width: 1),
-                boxShadow: [
-                  BoxShadow(
-                    color: Colors.black.withOpacity(0.1),
-                    blurRadius: 4,
-                    offset: const Offset(0, 2),
-                  ),
-                ],
-              ),
-              padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
-              child: Row(
-                children: [
-                  Expanded(
-                    child: Text(
-                      _selectedTimezone,
-                      style: GoogleFonts.poppins(
-                        color: textPrimary,
-                        fontSize: 15,
-                        fontWeight: FontWeight.w500,
-                      ),
-                    ),
-                  ),
-                  Icon(
-                    _showTimezoneDropdown ? Icons.arrow_drop_up : Icons.arrow_drop_down,
-                    color: textSecondary,
-                    size: 24,
-                  ),
-                ],
-              ),
-            ),
-          ),
-        ),
-      ],
-    );
-  }
-
-  void _toggleTimezoneDropdown() {
-    if (_showTimezoneDropdown) {
-      _hideTimezoneDropdown();
-    } else {
-      _showTimezoneDropdown = true;
-      _showTimezoneOverlay();
+  bool _matchesTimezone(String timezone, String query) {
+    if (query.isEmpty) return true;
+    final lowerQuery = query.toLowerCase();
+    final lowerTz = timezone.toLowerCase();
+    if (lowerTz.contains(lowerQuery)) return true;
+    for (final entry in _timezoneAliases.entries) {
+      if (entry.key.toLowerCase().contains(lowerQuery) && entry.value == timezone) {
+        return true;
+      }
     }
+    return false;
   }
 
-  void _showTimezoneOverlay() {
-    final renderBox = context.findRenderObject() as RenderBox;
-    final size = renderBox.size;
-    final offset = renderBox.localToGlobal(Offset.zero);
+Widget _buildTimezoneSelector() {
+  final filteredTimezones = _timezoneSearchController.text.isNotEmpty
+      ? _allTimezones.where((tz) => _matchesTimezone(tz, _timezoneSearchController.text)).toList()
+      : _allTimezones;
 
-    _timezoneOverlayEntry = OverlayEntry(
-      builder: (context) => Positioned(
-        left: offset.dx,
-        top: offset.dy + size.height + 4,
-        width: size.width,
-        child: Material(
-          elevation: 4,
-          borderRadius: BorderRadius.circular(8),
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      _buildRequiredLabel('Timezone', isRequired: false),
+      const SizedBox(height: 8),
+      GestureDetector(
+        onTap: () {
+          _timezoneFocusNode.requestFocus();
+          _toggleTimezoneDropdown();
+        },
+        child: AbsorbPointer(
+          absorbing: true,
           child: Container(
-            constraints: const BoxConstraints(maxHeight: 200),
             decoration: BoxDecoration(
+              borderRadius: BorderRadius.circular(12),
               color: secondaryColor,
-              borderRadius: BorderRadius.circular(8),
+              border: Border.all(color: borderColor, width: 1),
               boxShadow: [
                 BoxShadow(
                   color: Colors.black.withOpacity(0.1),
-                  blurRadius: 8,
-                  offset: const Offset(0, 4),
+                  blurRadius: 4,
+                  offset: const Offset(0, 2),
                 ),
               ],
             ),
-            child: ListView.builder(
-              shrinkWrap: true,
-              padding: EdgeInsets.zero,
-              itemCount: _allTimezones.length,
-              itemBuilder: (context, index) {
-                final timezone = _allTimezones[index];
-                return ListTile(
-                  title: Text(
-                    timezone,
+            padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 16),
+            child: Row(
+              children: [
+                Expanded(
+                  child: Text(
+                    _selectedTimezone,
                     style: GoogleFonts.poppins(
                       color: textPrimary,
-                      fontSize: 14,
+                      fontSize: 15,
                       fontWeight: FontWeight.w500,
                     ),
                   ),
-                  onTap: () {
-                    setState(() {
-                      _selectedTimezone = timezone;
-                    });
-                    _hideTimezoneDropdown();
-                  },
-                );
-              },
+                ),
+                Icon(
+                  _showTimezoneDropdown ? Icons.arrow_drop_up : Icons.arrow_drop_down,
+                  color: textSecondary,
+                  size: 24,
+                ),
+              ],
             ),
           ),
         ),
       ),
-    );
+      if (_showTimezoneDropdown)
+        Container(
+          margin: const EdgeInsets.only(top: 4),
+          constraints: const BoxConstraints(maxHeight: 200),
+          decoration: BoxDecoration(
+            color: secondaryColor,
+            borderRadius: BorderRadius.circular(8),
+            boxShadow: [
+              BoxShadow(
+                color: Colors.black.withOpacity(0.1),
+                blurRadius: 8,
+                offset: const Offset(0, 4),
+              ),
+            ],
+          ),
+          child: Column(
+            children: [
+              Padding(
+                padding: const EdgeInsets.all(8.0),
+                child: TextField(
+                  controller: _timezoneSearchController,
+                  decoration: InputDecoration(
+                    hintText: 'Search timezone or abbreviation',
+                    border: const OutlineInputBorder(),
+                    prefixIcon: const Icon(Icons.search),
+                  ),
+                ),
+              ),
+              Expanded(
+                child: ListView.builder(
+                  padding: EdgeInsets.zero,
+                  itemCount: filteredTimezones.length,
+                  itemBuilder: (context, index) {
+                    final timezone = filteredTimezones[index];
+                    return ListTile(
+                      dense: true,
+                      contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 4),
+                      title: Text(
+                        timezone,
+                        style: GoogleFonts.poppins(
+                          color: textPrimary,
+                          fontSize: 14,
+                          fontWeight: FontWeight.w500,
+                        ),
+                      ),
+                      onTap: () {
+                        setState(() {
+                          _selectedTimezone = timezone;
+                        });
+                        _hideTimezoneDropdown();
+                        _timezoneFocusNode.unfocus();
+                      },
+                    );
+                  },
+                ),
+              ),
+            ],
+          ),
+        ),
+    ],
+  );
+}
 
-    Overlay.of(context).insert(_timezoneOverlayEntry!);
+  void _toggleTimezoneDropdown() {
+    setState(() {
+      if (_showTimezoneDropdown) {
+        _showTimezoneDropdown = false;
+      } else {
+        _showTimezoneDropdown = true;
+        _timezoneSearchController.clear();
+      }
+    });
   }
 
   void _hideTimezoneDropdown() {
-    _timezoneOverlayEntry?.remove();
-    _timezoneOverlayEntry = null;
     setState(() {
       _showTimezoneDropdown = false;
     });

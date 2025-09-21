@@ -1,3 +1,5 @@
+// ignore_for_file: avoid_types_as_parameter_names
+
 import 'package:flutter/material.dart';
 import 'package:cloud_firestore/cloud_firestore.dart';
 import 'package:game_app/models/tournament.dart';
@@ -40,21 +42,21 @@ class _PlayPageState extends State<PlayPage> {
   DisplayMode _displayMode = DisplayMode.list;
 
   final List<String> _gameTypes = [
-    'All',
-     'Knockout',
-              'Round-Robin',
-              'Double Elimination',
-              'Group + Knockout',
-              'Team Format',
-              'Ladder',
-              'Swiss Format',
+   'All',
+    'Knockout',
+    'Round-Robin',
+    'Double Elimination',
+    'Group + Knockout',
+    'Team Format',
+    'Ladder',
+    'Swiss Format',
   ];
 
   @override
   void initState() {
     super.initState();
     _searchFocusNode.addListener(() {
-      setState(() {});
+      setState(() {} );
     });
     print('PlayPage initialized with userCity: "${widget.userCity}"');
     _validateUserCity();
@@ -68,7 +70,6 @@ class _PlayPageState extends State<PlayPage> {
   }
 
   String _normalizeCity(String city) {
-    // Normalize city by taking the primary city name (before first comma) and converting to lowercase
     return city.split(',')[0].trim().toLowerCase();
   }
 
@@ -106,7 +107,6 @@ class _PlayPageState extends State<PlayPage> {
       return isValid;
     } catch (e) {
       print('City validation error for "$city": $e');
-      // Fallback to allowing non-empty city to avoid blocking valid cities
       return trimmedCity.isNotEmpty;
     }
   }
@@ -776,94 +776,110 @@ class _PlayPageState extends State<PlayPage> {
     
     return Card(
       margin: const EdgeInsets.all(8),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: InkWell(
-        borderRadius: BorderRadius.circular(12),
-        onTap: () => Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => TournamentDetailsPage(
-              tournament: tournament,
-              creatorName: creatorName,
-            ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      elevation: 4,
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Colors.white,
+              Colors.blueGrey[50]!,
+            ],
           ),
         ),
-        child: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Expanded(
-              child: ClipRRect(
-                borderRadius: const BorderRadius.vertical(top: Radius.circular(12)),
-                child: tournament.profileImage != null && tournament.profileImage!.isNotEmpty
-                    ? Image.network(
-                        tournament.profileImage!,
-                        fit: BoxFit.cover,
-                        width: double.infinity,
-                        height: double.infinity,
-                        errorBuilder: (context, error, stackTrace) {
-                          print('Image load error for ${tournament.profileImage}: $error');
-                          return Container(
-                            color: Colors.grey[200],
-                            child: const Icon(Icons.broken_image, color: Colors.grey),
-                          );
-                        },
-                      )
-                    : Image.asset(
-                        'assets/tournament_placholder.jpg',
-                        fit: BoxFit.cover,
-                        width: double.infinity,
-                        height: double.infinity,
-                      ),
+        child: InkWell(
+          borderRadius: BorderRadius.circular(16),
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => TournamentDetailsPage(
+                tournament: tournament,
+                creatorName: creatorName,
               ),
             ),
-            Padding(
-              padding: const EdgeInsets.all(8),
-              child: Column(
-                crossAxisAlignment: CrossAxisAlignment.start,
-                children: [
-                  Text(
-                    tournament.name,
-                    style: GoogleFonts.poppins(
-                      fontWeight: FontWeight.w600,
-                      fontSize: 14,
-                      color: Colors.black,
-                    ),
-                    maxLines: 1,
-                    overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 4),
-                  Text(
-                    '${tournament.gameType} • ${DateFormat('MMM d').format(tz.TZDateTime.from(tournament.startDate, tz.getLocation(tournament.timezone)))} • ${tournament.city}',
-                    style: GoogleFonts.poppins(
-                      color: const Color.fromARGB(255, 68, 67, 67),
-                      fontSize: 12,
-                      
-                    ),
-                    maxLines: 1,
-                      overflow: TextOverflow.ellipsis,
-                  ),
-                  const SizedBox(height: 4),
-                  Row(
-                    children: [
-                      Icon(Icons.people, size: 12, color: Colors.grey[600]),
-                      const SizedBox(width: 4),
-                      Expanded(
-                        child: Text(
-                          '$totalParticipants Participant${totalParticipants != 1 ? 's' : ''}',
-                          style: GoogleFonts.poppins(
-                            color: Colors.grey[600],
-                            fontSize: 11,
-                          
-                          ),
-                           overflow : TextOverflow.ellipsis,
+          ),
+          child: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Expanded(
+                child: ClipRRect(
+                  borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+                  child: tournament.profileImage != null && tournament.profileImage!.isNotEmpty
+                      ? Image.network(
+                          tournament.profileImage!,
+                          fit: BoxFit.cover,
+                          width: double.infinity,
+                          height: double.infinity,
+                          errorBuilder: (context, error, stackTrace) {
+                            print('Image load error for ${tournament.profileImage}: $error');
+                            return Container(
+                              color: Colors.blueGrey[100],
+                              child: const Icon(Icons.broken_image, color: Colors.grey),
+                            );
+                          },
+                        )
+                      : Image.asset(
+                          'assets/tournament_placholder.jpg',
+                          fit: BoxFit.cover,
+                          width: double.infinity,
+                          height: double.infinity,
                         ),
-                      ),
-                    ],
-                  ),
-                ],
+                ),
               ),
-            ),
-          ],
+              Container(
+                padding: const EdgeInsets.all(12),
+                decoration: BoxDecoration(
+                  color: Colors.white.withOpacity(0.9),
+                  borderRadius: const BorderRadius.vertical(bottom: Radius.circular(16)),
+                ),
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      tournament.name,
+                      style: GoogleFonts.poppins(
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                        color: Colors.black87,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Text(
+                      '${tournament.gameType} • ${DateFormat('MMM d').format(tz.TZDateTime.from(tournament.startDate, tz.getLocation(tournament.timezone)))} • ${tournament.city}',
+                      style: GoogleFonts.poppins(
+                        color: Colors.blueGrey[700],
+                        fontSize: 12,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Icon(Icons.people, size: 12, color: Colors.blueGrey[500]),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            '$totalParticipants Participant${totalParticipants != 1 ? 's' : ''}',
+                            style: GoogleFonts.poppins(
+                              color: Colors.blueGrey[500],
+                              fontSize: 11,
+                            ),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        ),
+                      ],
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
         ),
       ),
     );
@@ -876,74 +892,98 @@ class _PlayPageState extends State<PlayPage> {
     required String? userId,
   }) {
     final creatorName = creatorNames[tournament.createdBy] ?? 'Unknown User';
-    final totalParticipants = tournament.events.fold(0, (su, event) => su + event.participants.length);
+    final totalParticipants = tournament.events.fold(0, (sum, event) => sum + event.participants.length);
     
     return Card(
       margin: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(12)),
-      child: ListTile(
-        contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-        leading: SizedBox(
-          width: 50,
-          height: 50,
-          child: ClipRRect(
-            borderRadius: BorderRadius.circular(8),
-            child: tournament.profileImage != null && tournament.profileImage!.isNotEmpty
-                ? Image.network(
-                    tournament.profileImage!,
-                    fit: BoxFit.cover,
-                    width: 50,
-                    height: 50,
-                    errorBuilder: (context, error, stackTrace) {
-                      print('Image load error for ${tournament.profileImage}: $error');
-                      return Container(
-                        color: Colors.grey[200],
-                        child: const Icon(Icons.broken_image, color: Colors.grey),
-                      );
-                    },
-                  )
-                : Image.asset(
-                    'assets/tournament_placholder.jpg',
-                    fit: BoxFit.cover,
-                    width: 50,
-                    height: 50,
-                  ),
+      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+      elevation: 3,
+      child: Container(
+        decoration: BoxDecoration(
+          borderRadius: BorderRadius.circular(16),
+          gradient: LinearGradient(
+            begin: Alignment.topLeft,
+            end: Alignment.bottomRight,
+            colors: [
+              Colors.white,
+              Colors.blueGrey[50]!,
+            ],
           ),
         ),
-        title: Text(
-          tournament.name,
-          style: GoogleFonts.poppins(fontWeight: FontWeight.w500),
-          maxLines: 1,
-          overflow: TextOverflow.ellipsis,
-        ),
-        subtitle: Column(
-          crossAxisAlignment: CrossAxisAlignment.start,
-          children: [
-            Text(
-              '${tournament.gameType} • ${DateFormat('MMM d').format(tz.TZDateTime.from(tournament.startDate, tz.getLocation(tournament.timezone)))} • ${tournament.city}',
-              style: GoogleFonts.poppins(fontSize: 12),
-              maxLines: 1,
-              overflow: TextOverflow.ellipsis,
+        child: ListTile(
+          contentPadding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+          leading: SizedBox(
+            width: 50,
+            height: 50,
+            child: ClipRRect(
+              borderRadius: BorderRadius.circular(12),
+              child: tournament.profileImage != null && tournament.profileImage!.isNotEmpty
+                  ? Image.network(
+                      tournament.profileImage!,
+                      fit: BoxFit.cover,
+                      width: 50,
+                      height: 50,
+                      errorBuilder: (context, error, stackTrace) {
+                        print('Image load error for ${tournament.profileImage}: $error');
+                        return Container(
+                          color: Colors.blueGrey[100],
+                          child: const Icon(Icons.broken_image, color: Colors.grey),
+                        );
+                      },
+                    )
+                  : Image.asset(
+                      'assets/tournament_placholder.jpg',
+                      fit: BoxFit.cover,
+                      width: 50,
+                      height: 50,
+                    ),
             ),
-            Row(
-              children: [
-                Icon(Icons.people, size: 12, color: Colors.grey[600]),
-                const SizedBox(width: 4),
-                Text(
-                  '$totalParticipants Participant${totalParticipants != 1 ? 's' : ''}',
-                  style: GoogleFonts.poppins(fontSize: 11, color: Colors.grey[600]),
+          ),
+          title: Text(
+            tournament.name,
+            style: GoogleFonts.poppins(
+              fontWeight: FontWeight.w600,
+              fontSize: 14,
+              color: Colors.black87,
+            ),
+            maxLines: 1,
+            overflow: TextOverflow.ellipsis,
+          ),
+          subtitle: Column(
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              Text(
+                '${tournament.gameType} • ${DateFormat('MMM d').format(tz.TZDateTime.from(tournament.startDate, tz.getLocation(tournament.timezone)))} • ${tournament.city}',
+                style: GoogleFonts.poppins(
+                  fontSize: 12,
+                  color: Colors.blueGrey[700],
                 ),
-              ],
-            ),
-          ],
-        ),
-        trailing: const Icon(Icons.chevron_right, color: Colors.grey),
-        onTap: () => Navigator.push(
-          context,
-          MaterialPageRoute(
-            builder: (context) => TournamentDetailsPage(
-              tournament: tournament,
-              creatorName: creatorName,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+              ),
+              Row(
+                children: [
+                  Icon(Icons.people, size: 12, color: Colors.blueGrey[500]),
+                  const SizedBox(width: 4),
+                  Text(
+                    '$totalParticipants Participant${totalParticipants != 1 ? 's' : ''}',
+                    style: GoogleFonts.poppins(
+                      fontSize: 11,
+                      color: Colors.blueGrey[500],
+                    ),
+                  ),
+                ],
+              ),
+            ],
+          ),
+          trailing: Icon(Icons.chevron_right, color: Colors.blueGrey[500]),
+          onTap: () => Navigator.push(
+            context,
+            MaterialPageRoute(
+              builder: (context) => TournamentDetailsPage(
+                tournament: tournament,
+                creatorName: creatorName,
+              ),
             ),
           ),
         ),
@@ -960,6 +1000,11 @@ class _PlayPageState extends State<PlayPage> {
   Widget build(BuildContext context) {
     final authState = context.read<AuthBloc>().state;
     final userId = authState is AuthAuthenticated ? authState.user.uid : null;
+    // Calculate responsive search bar width
+    final double screenWidth = MediaQuery.of(context).size.width;
+    final double searchBarWidth = _isSearchExpanded 
+        ? screenWidth - 180 // Adjusted to account for sort button and padding
+        : 52;
 
     return Scaffold(
       backgroundColor: Colors.grey[50],
@@ -1000,7 +1045,7 @@ class _PlayPageState extends State<PlayPage> {
                     children: [
                       AnimatedContainer(
                         duration: const Duration(milliseconds: 200),
-                        width: _isSearchExpanded ? MediaQuery.of(context).size.width - 150 : 52,
+                        width: searchBarWidth,
                         height: 48,
                         decoration: BoxDecoration(
                           color: Colors.white,
@@ -1085,6 +1130,7 @@ class _PlayPageState extends State<PlayPage> {
                           ],
                         ),
                       ),
+                      const SizedBox(width: 8),
                       Container(
                         width: 140,
                         height: 48,
@@ -1258,16 +1304,15 @@ class _PlayPageState extends State<PlayPage> {
                     return matchesCity && isNotCompleted && matchesGameType && matchesDateRange && matchesSearch;
                   }).toList();
 
-                  // FIX: Sort tournaments from latest to oldest (newest first)
                   if (_sortBy == 'date') {
-                    filteredTournaments.sort((a, b) => b.startDate.compareTo(a.startDate)); // Changed to descending order
+                    filteredTournaments.sort((a, b) => b.startDate.compareTo(a.startDate));
                   } else if (_sortBy == 'name') {
                     filteredTournaments.sort((a, b) => a.name.compareTo(b.name));
                   } else if (_sortBy == 'eventParticipants') {
                     filteredTournaments.sort((a, b) {
-                      final aParticipants = a.events.fold(0, (su, event) => su + event.participants.length);
-                      final bParticipants = b.events.fold(0, (su, event) => su + event.participants.length);
-                      return bParticipants.compareTo(aParticipants); // Changed to descending order
+                      final aParticipants = a.events.fold(0, (sum, event) => sum + event.participants.length);
+                      final bParticipants = b.events.fold(0, (sum, event) => sum + event.participants.length);
+                      return bParticipants.compareTo(aParticipants);
                     });
                   }
 

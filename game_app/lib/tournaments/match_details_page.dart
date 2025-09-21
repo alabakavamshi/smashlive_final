@@ -61,36 +61,41 @@ class _MatchDetailsPageState extends State<MatchDetailsPage>
   List<String> _timeSlots = [];
   int _numberOfCourts = 1;
 
-  @override
-  void initState() {
-    super.initState();
-    tz.initializeTimeZones();
-    _match = Map.from(widget.match);
-    _umpireNameController.text = _match['umpire']?['name'] ?? '';
-    _umpireEmailController.text = _match['umpire']?['email'] ?? '';
-    _umpirePhoneController.text = _match['umpire']?['phone'] ?? '';
-    _initialUmpireName = _umpireNameController.text;
-    _initialUmpireEmail = _umpireEmailController.text;
-    _initialUmpirePhone = _umpirePhoneController.text;
-    _lastTeam1Score = _getCurrentScore(true);
-    _lastTeam2Score = _getCurrentScore(false);
-    _matchStartTime = _match['startTime'] as Timestamp?;
-    _listenToTournamentUpdates();
-    _initializeTimezone();
+@override
+void initState() {
+  super.initState();
+  tz.initializeTimeZones();
+  _match = Map.from(widget.match);
+  _umpireNameController.text = _match['umpire']?['name'] ?? '';
+  _umpireEmailController.text = _match['umpire']?['email'] ?? '';
+  _umpirePhoneController.text = _match['umpire']?['phone'] ?? '';
+  _initialUmpireName = _umpireNameController.text;
+  _initialUmpireEmail = _umpireEmailController.text;
+  _initialUmpirePhone = _umpirePhoneController.text;
+  _lastTeam1Score = _getCurrentScore(true);
+  _lastTeam2Score = _getCurrentScore(false);
+  print('Initial matchStartTime: $_matchStartTime');
+  print('Match data: $_match');
+  _matchStartTime = _match['startTime'] as Timestamp?;
+  _listenToTournamentUpdates();
+  _initializeTimezone().then((_) {
     _initializeServer();
     _listenToMatchUpdates();
     _loadTournamentSettings();
-    _animationController = AnimationController(
-      vsync: this,
-      duration: const Duration(milliseconds: 600),
-    );
-    _scaleAnimation = Tween<double>(begin: 0.8, end: 1.2).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
-    );
-    _fadeAnimation = Tween<double>(begin: 1.0, end: 0.0).animate(
-      CurvedAnimation(parent: _animationController, curve: Curves.easeIn),
-    );
-  }
+    _startCountdown(); // Start countdown AFTER timezone is initialized
+  });
+  
+  _animationController = AnimationController(
+    vsync: this,
+    duration: const Duration(milliseconds: 600),
+  );
+  _scaleAnimation = Tween<double>(begin: 0.8, end: 1.2).animate(
+    CurvedAnimation(parent: _animationController, curve: Curves.easeOut),
+  );
+  _fadeAnimation = Tween<double>(begin: 1.0, end: 0.0).animate(
+    CurvedAnimation(parent: _animationController, curve: Curves.easeIn),
+  );
+}
 
   @override
   void dispose() {
@@ -175,47 +180,60 @@ void _listenToTournamentUpdates() {
     }
   }
 
-  Future<void> _initializeTimezone() async {
-    try {
-      final tournamentDoc = await FirebaseFirestore.instance
-          .collection('tournaments')
-          .doc(widget.tournamentId)
-          .get();
+Future<void> _initializeTimezone() async {
+  try {
+    final tournamentDoc = await FirebaseFirestore.instance
+        .collection('tournaments')
+        .doc(widget.tournamentId)
+        .get();
 
-      final timezone = tournamentDoc.data()?['timezone'] as String? ?? 'UTC';
+    final timezone = tournamentDoc.data()?['timezone'] as String? ?? 'UTC';
 
-      setState(() {
-        try {
-          _timezoneLocation = tz.getLocation(timezone);
-        } catch (e) {
-          debugPrint('Invalid timezone: $timezone, defaulting to UTC');
-          _timezoneLocation = tz.getLocation('UTC');
-        }
-        _isTimezoneInitialized = true;
-      });
-      _startCountdown();
-    } catch (e) {
-      debugPrint('Error initializing timezone: $e');
-      setState(() {
+    setState(() {
+      try {
+        _timezoneLocation = tz.getLocation(timezone);
+      } catch (e) {
+        debugPrint('Invalid timezone: $timezone, defaulting to UTC');
         _timezoneLocation = tz.getLocation('UTC');
-        _isTimezoneInitialized = true;
-      });
-      _startCountdown();
-    }
+      }
+      _isTimezoneInitialized = true;
+    });
+    
+    return; // Return here to indicate completion
+  } catch (e) {
+    debugPrint('Error initializing timezone: $e');
+    setState(() {
+      _timezoneLocation = tz.getLocation('UTC');
+      _isTimezoneInitialized = true;
+    });
+    return; // Return here to indicate completion
   }
+}
 
-  DateTime _convertToTournamentTime(Timestamp timestamp) {
-    if (_timezoneLocation == null) return timestamp.toDate();
-    final utcTime = timestamp.toDate();
-    return tz.TZDateTime.from(utcTime, _timezoneLocation!);
+DateTime _convertToTournamentTime(Timestamp timestamp) {
+  if (_timezoneLocation == null) {
+    return timestamp.toDate(); // Fallback
   }
+  
+  // Convert the stored timestamp to tournament timezone
+  final storedTime = timestamp.toDate();
+  
+  // Create a new datetime in the tournament's timezone
+  final tournamentTime = tz.TZDateTime(
+    _timezoneLocation!,
+    storedTime.year,
+    storedTime.month,
+    storedTime.day,
+    storedTime.hour,
+    storedTime.minute,
+    storedTime.second,
+  );
+  
+  return tournamentTime;
+}
 
 
-
-
-
-
-void _startCountdown() {
+Future<void> _startCountdown() async {
   if (!_isTimezoneInitialized || _timezoneLocation == null) {
     _countdownTimer?.cancel();
     _countdownTimer = Timer(
@@ -225,21 +243,35 @@ void _startCountdown() {
     return;
   }
 
-  if (_match['liveScores']?['isLive'] == true ||
-      _match['completed'] == true) {
+  if (_match['liveScores']?['isLive'] == true || _match['completed'] == true) {
     setState(() => _countdown = null);
     _countdownTimer?.cancel();
     return;
   }
 
-  // Calculate match start time from the specific match date and time slot
-  _calculateMatchStartTime().then((calculatedStartTime) {
-    if (calculatedStartTime == null) {
-      setState(() => _countdown = 'Start time not scheduled');
-      _countdownTimer?.cancel();
-      return;
-    }
+  if (_matchStartTime == null) {
+    setState(() => _countdown = 'Not scheduled yet');
+    _countdownTimer?.cancel();
+    return;
+  }
 
+  // Get match time in tournament timezone
+  final matchDateTime = _convertToTournamentTime(_matchStartTime!);
+  
+  // Get current time in tournament timezone
+  final nowInTournament = tz.TZDateTime.now(_timezoneLocation!);
+  
+  final difference = matchDateTime.difference(nowInTournament);
+
+  // Debug output
+  print('Match DateTime (Tournament): $matchDateTime');
+  print('Now (Tournament): $nowInTournament');
+  print('Difference: $difference');
+
+  if (difference.isNegative) {
+    setState(() => _countdown = 'Match should have started');
+    _countdownTimer?.cancel();
+  } else {
     _countdownTimer?.cancel();
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) {
@@ -247,101 +279,45 @@ void _startCountdown() {
         return;
       }
 
-      final now = tz.TZDateTime.now(_timezoneLocation!);
-      final difference = calculatedStartTime.difference(now);
+      final currentNowInTournament = tz.TZDateTime.now(_timezoneLocation!);
+      final currentDifference = matchDateTime.difference(currentNowInTournament);
 
-      if (difference.isNegative) {
+      if (currentDifference.isNegative) {
         setState(() => _countdown = 'Match should have started');
         timer.cancel();
       } else {
         setState(() {
-          _countdown = _formatDuration(difference);
+          _countdown = _formatDuration(currentDifference);
         });
       }
     });
-  });
-}
-
-Future<tz.TZDateTime?> _calculateMatchStartTime() async {
-  try {
-    // Get time slot from match
-    final timeSlot = _match['timeSlot'] as String?;
-    if (timeSlot == null || timeSlot.isEmpty) return null;
-
-    // Parse time slot (assuming format like "09:00-10:00")
-    final timeParts = timeSlot.split('-');
-    if (timeParts.isEmpty) return null;
-
-    final startTimeParts = timeParts[0].trim().split(':');
-    if (startTimeParts.length != 2) return null;
-
-    final startHour = int.tryParse(startTimeParts[0]);
-    final startMinute = int.tryParse(startTimeParts[1]);
-    if (startHour == null || startMinute == null) return null;
-
-    // Get the specific date for this match - use matchStartTime first
-    DateTime matchDate;
-    if (_matchStartTime != null) {
-      // Use the specific date assigned to this match
-      matchDate = _convertToTournamentTime(_matchStartTime!);
-    } else {
-      // If no specific date, try to get from the match data directly
-      final matchDoc = await FirebaseFirestore.instance
-          .collection('tournaments')
-          .doc(widget.tournamentId)
-          .collection('matches')
-          .doc(_match['matchId'])
-          .get();
-      
-      final matchData = matchDoc.data();
-      if (matchData != null && matchData['startTime'] != null) {
-        matchDate = _convertToTournamentTime(matchData['startTime'] as Timestamp);
-      } else {
-        // Fall back to tournament start date if no specific date is set
-        final tournamentDoc = await FirebaseFirestore.instance
-            .collection('tournaments')
-            .doc(widget.tournamentId)
-            .get();
-        
-        final tournamentData = tournamentDoc.data();
-        if (tournamentData == null) return null;
-        
-        final tournamentStartDate = tournamentData['startDate'] as Timestamp?;
-        if (tournamentStartDate == null) return null;
-        
-        matchDate = _convertToTournamentTime(tournamentStartDate);
-      }
-    }
-
-    // Create the calculated start time using the date and time slot
-    final calculatedStartTime = tz.TZDateTime(
-      _timezoneLocation!,
-      matchDate.year,
-      matchDate.month,
-      matchDate.day,
-      startHour,
-      startMinute,
-    );
-
-    return calculatedStartTime;
-  } catch (e) {
-    debugPrint('Error calculating match start time: $e');
-    return null;
   }
 }
 
+
+String _formatDuration(Duration duration) {
+  if (duration.inDays >= 1) {
+    return '${duration.inDays}d ${duration.inHours % 24}h ${duration.inMinutes % 60}m';
+  } else if (duration.inHours >= 1) {
+    return '${duration.inHours}h ${duration.inMinutes % 60}m ${duration.inSeconds % 60}s';
+  } else if (duration.inMinutes >= 1) {
+    return '${duration.inMinutes}m ${duration.inSeconds % 60}s';
+  } else {
+    return '${duration.inSeconds}s';
+  }
+}
 
 
 String _formatDateWithTimezone(DateTime date) {
   final timeSlot = _match['timeSlot']?.toString();
   final court = _match['court'] != null ? 'Court ${_match['court']}' : '';
   
-  // Display the complete date and time information
-  String baseInfo = DateFormat('MMM dd, yyyy').format(date);
+  // Format the complete date with time
+  String baseInfo = DateFormat('MMM dd, yyyy • HH:mm').format(date);
   
   List<String> additionalInfo = [];
   if (timeSlot != null && timeSlot.isNotEmpty) {
-    additionalInfo.add(timeSlot);
+    additionalInfo.add('Slot: $timeSlot');
   }
   if (court.isNotEmpty) {
     additionalInfo.add(court);
@@ -354,7 +330,7 @@ String _formatDateWithTimezone(DateTime date) {
   return baseInfo;
 }
 
-// Update the _updateMatchStartTime method to properly set the calculated time
+
 Future<void> _updateMatchStartTime() async {
   if (_isLoading ||
       _match['liveScores']?['isLive'] == true ||
@@ -366,54 +342,74 @@ Future<void> _updateMatchStartTime() async {
   setState(() => _isLoading = true);
 
   try {
+    // Get tournament dates
     final tournamentDoc = await FirebaseFirestore.instance
         .collection('tournaments')
         .doc(widget.tournamentId)
         .get();
+    
     final data = tournamentDoc.data();
     if (data == null) {
       throw Exception('Tournament data not found');
     }
 
-    // Get tournament time bounds in local timezone
-    final tournamentStartDate = tz.TZDateTime.from(
-      (data['startDate'] as Timestamp).toDate(),
-      _timezoneLocation!,
-    );
-    final tournamentEndDate = tz.TZDateTime.from(
-      (data['endDate'] as Timestamp).toDate(),
-      _timezoneLocation!,
-    );
-    final now = tz.TZDateTime.now(_timezoneLocation!);
+    // Get tournament time bounds
+    final tournamentStartDate = (data['startDate'] as Timestamp).toDate();
+    final tournamentEndDate = (data['endDate'] as Timestamp).toDate();
+    
+    // Use current match date if available, otherwise use tournament start date
+    DateTime selectedDate = _matchStartTime != null 
+        ? _matchStartTime!.toDate()
+        : tournamentStartDate;
 
-    final firstDate = now.isAfter(tournamentStartDate) ? now : tournamentStartDate;
-    final lastDate = tournamentEndDate;
+    // Get all matches to check for conflicts
+    final matchesSnapshot = await FirebaseFirestore.instance
+        .collection('tournaments')
+        .doc(widget.tournamentId)
+        .collection('matches')
+        .where('eventId', isEqualTo: _match['eventId'])
+        .get();
 
-    // Use calculated start time if available, otherwise use current date
-    final calculatedStartTime = await _calculateMatchStartTime();
-    final initialDate = calculatedStartTime ?? 
-        (_matchStartTime != null
-            ? _convertToTournamentTime(_matchStartTime!)
-            : now);
+    // Create a map of occupied time slots and courts for each date
+    final occupiedSlotsByDate = <String, Map<String, Set<int>>>{};
+    
+    for (var matchDoc in matchesSnapshot.docs) {
+      final matchData = matchDoc.data();
+      if (matchDoc.id != _match['matchId'] && // Skip current match
+          matchData['startTime'] != null && 
+          matchData['timeSlot'] != null && 
+          matchData['court'] != null) {
+        
+        final matchDate = (matchData['startTime'] as Timestamp).toDate();
+        final dateKey = DateFormat('yyyy-MM-dd').format(matchDate);
+        final timeSlot = matchData['timeSlot'] as String;
+        final court = matchData['court'] as int;
+        
+        if (!occupiedSlotsByDate.containsKey(dateKey)) {
+          occupiedSlotsByDate[dateKey] = <String, Set<int>>{};
+        }
+        if (!occupiedSlotsByDate[dateKey]!.containsKey(timeSlot)) {
+          occupiedSlotsByDate[dateKey]![timeSlot] = <int>{};
+        }
+        occupiedSlotsByDate[dateKey]![timeSlot]!.add(court);
+      }
+    }
 
-    // Show date picker in local timezone
+    // Step 1: Date selection
     final newDate = await showDatePicker(
       context: context,
-      initialDate: initialDate.isBefore(firstDate)
-          ? firstDate
-          : (initialDate.isAfter(lastDate) ? lastDate : initialDate),
-      firstDate: firstDate,
-      lastDate: lastDate,
+      initialDate: selectedDate,
+      firstDate: tournamentStartDate,
+      lastDate: tournamentEndDate,
       builder: (context, child) {
         return Theme(
           data: ThemeData.light().copyWith(
             colorScheme: const ColorScheme.light(
               primary: Color(0xFF6C9A8B),
-              onPrimary: Color(0xFFFDFCFB),
-              surface: Color(0xFFFFFFFF),
-              onSurface: Color(0xFF333333),
+              onPrimary: Colors.white,
+              surface: Colors.white,
+              onSurface: Colors.black,
             ),
-            textTheme: GoogleFonts.poppinsTextTheme(),
           ),
           child: child!,
         );
@@ -425,35 +421,10 @@ Future<void> _updateMatchStartTime() async {
       return;
     }
 
-    // Get all matches to check for conflicts
-    final matchesSnapshot = await FirebaseFirestore.instance
-        .collection('tournaments')
-        .doc(widget.tournamentId)
-        .collection('matches')
-        .where('eventId', isEqualTo: _match['eventId'])
-        .get();
+    selectedDate = newDate;
+    final dateKey = DateFormat('yyyy-MM-dd').format(selectedDate);
 
-    // Create a map of occupied time slots and courts for the selected date
-    final occupiedSlots = <String, Set<int>>{};
-    
-    for (var matchDoc in matchesSnapshot.docs) {
-      final matchData = matchDoc.data();
-      if (matchDoc.id != _match['matchId'] && // Skip current match
-          matchData['timeSlot'] != null && matchData['court'] != null) {
-        
-        // For matches with time slots, check if they're on the same day
-        // You might want to add a date field to matches for more precise conflict checking
-        final timeSlot = matchData['timeSlot'] as String;
-        final court = matchData['court'] as int;
-        
-        if (!occupiedSlots.containsKey(timeSlot)) {
-          occupiedSlots[timeSlot] = <int>{};
-        }
-        occupiedSlots[timeSlot]!.add(court);
-      }
-    }
-
-    // Show time slot and court selection dialog
+    // Step 2: Time slot and court selection
     String? selectedTimeSlot;
     int? selectedCourt;
 
@@ -462,7 +433,7 @@ Future<void> _updateMatchStartTime() async {
       builder: (context) => StatefulBuilder(
         builder: (context, setStateDialog) => AlertDialog(
           title: Text(
-            'Select Time Slot & Court',
+            'Select Time Slot & Court for ${DateFormat('MMM dd, yyyy').format(selectedDate)}',
             style: GoogleFonts.poppins(
               fontWeight: FontWeight.w600,
               color: const Color(0xFF333333),
@@ -493,8 +464,8 @@ Future<void> _updateMatchStartTime() async {
                     )
                   else
                     ..._timeSlots.map((slot) {
-                      final isFullyOccupied = occupiedSlots.containsKey(slot) && 
-                          occupiedSlots[slot]!.length >= _numberOfCourts;
+                      final occupiedCourts = occupiedSlotsByDate[dateKey]?[slot] ?? <int>{};
+                      final isFullyOccupied = occupiedCourts.length >= _numberOfCourts;
                       final isSelected = selectedTimeSlot == slot;
                       
                       return Card(
@@ -518,7 +489,7 @@ Future<void> _updateMatchStartTime() async {
                           },
                           subtitle: isFullyOccupied 
                               ? const Text('Fully booked', style: TextStyle(color: Colors.red))
-                              : null,
+                              : Text('${_numberOfCourts - occupiedCourts.length} courts available'),
                         ),
                       );
                     }),
@@ -541,7 +512,7 @@ Future<void> _updateMatchStartTime() async {
                       runSpacing: 8,
                       children: List.generate(_numberOfCourts, (index) {
                         final court = index + 1;
-                        final isOccupied = occupiedSlots[selectedTimeSlot]?.contains(court) ?? false;
+                        final isOccupied = occupiedSlotsByDate[dateKey]?[selectedTimeSlot]?.contains(court) ?? false;
                         final isSelected = selectedCourt == court;
                         
                         return FilterChip(
@@ -624,44 +595,14 @@ Future<void> _updateMatchStartTime() async {
     final startHour = int.parse(startTimeParts[0]);
     final startMinute = int.parse(startTimeParts[1]);
 
-    // Create datetime with selected date and time slot start time
-    final newDateTime = tz.TZDateTime(
-      _timezoneLocation!,
-      newDate.year,
-      newDate.month,
-      newDate.day,
+    
+    final newDateTime = DateTime(
+      selectedDate.year,
+      selectedDate.month,
+      selectedDate.day,
       startHour,
       startMinute,
     );
-
-    // Validate against tournament bounds
-    if (newDateTime.isBefore(tournamentStartDate)) {
-      toastification.show(
-        context: context,
-        type: ToastificationType.error,
-        title: const Text('Invalid Date'),
-        description: Text(
-          'Selected date cannot be before ${DateFormat('MMM dd, yyyy').format(tournamentStartDate)}',
-        ),
-        autoCloseDuration: const Duration(seconds: 2),
-      );
-      setState(() => _isLoading = false);
-      return;
-    }
-
-    if (newDateTime.isAfter(tournamentEndDate)) {
-      toastification.show(
-        context: context,
-        type: ToastificationType.error,
-        title: const Text('Invalid Date'),
-        description: Text(
-          'Selected date cannot be after ${DateFormat('MMM dd, yyyy').format(tournamentEndDate)}',
-        ),
-        autoCloseDuration: const Duration(seconds: 2),
-      );
-      setState(() => _isLoading = false);
-      return;
-    }
 
     // Convert to UTC for storage
     final utcDateTime = newDateTime.toUtc();
@@ -693,37 +634,25 @@ Future<void> _updateMatchStartTime() async {
     toastification.show(
       context: context,
       type: ToastificationType.success,
-      title: const Text('Start Time Updated'),
+      title: const Text('Schedule Updated'),
       description: Text(
-        'Match scheduled for ${_formatDateWithTimezone(newDateTime)}',
+        'Match scheduled for ${DateFormat('MMM dd, yyyy').format(newDateTime)} at $selectedTimeSlot on Court $selectedCourt',
       ),
       autoCloseDuration: const Duration(seconds: 2),
     );
   } catch (e) {
-    debugPrint('Error updating match start time: $e');
+    debugPrint('Error updating match schedule: $e');
     toastification.show(
       context: context,
       type: ToastificationType.error,
       title: const Text('Update Failed'),
-      description: Text('Failed to update start time: ${e.toString()}'),
+      description: Text('Failed to update schedule: ${e.toString()}'),
       autoCloseDuration: const Duration(seconds: 2),
     );
   } finally {
     setState(() => _isLoading = false);
   }
 }
-
-
-
-  String _formatDuration(Duration duration) {
-    if (duration.inDays >= 1) {
-      return '${duration.inDays}d ${duration.inHours % 24}h';
-    } else if (duration.inHours >= 1) {
-      return '${duration.inHours}h ${duration.inMinutes % 60}m';
-    } else {
-      return '${duration.inMinutes}m ${duration.inSeconds % 60}s';
-    }
-  }
 
 
   
@@ -804,6 +733,7 @@ int _getCurrentScore(bool isTeam1) {
     return scores[currentGame - 1].isEven ? 'Right' : 'Left';
   }
 
+
 void _listenToMatchUpdates() {
   FirebaseFirestore.instance
       .collection('tournaments')
@@ -878,6 +808,7 @@ void _listenToMatchUpdates() {
   });
 }
 
+
   int _getCurrentScoreFromMatch(Map<String, dynamic> match, bool isTeam1) {
   final liveScores = match['liveScores'] ?? {};
   final currentGame = liveScores['currentGame'] ?? 1;
@@ -933,7 +864,7 @@ void _listenToMatchUpdates() {
     }
   }
 
-  // Update these methods to work with the matches subcollection
+  
 
 Future<void> _updateUmpireDetails() async {
   if (_isLoading || _isUmpireButtonDisabled) return;
@@ -1557,6 +1488,9 @@ List<Map<String, dynamic>> _getAllSetResults() {
     );
   }
 
+
+
+
   Widget _buildLiveStatusBadge() {
     return Container(
       padding: const EdgeInsets.symmetric(horizontal: 12, vertical: 6),
@@ -1599,41 +1533,41 @@ List<Map<String, dynamic>> _getAllSetResults() {
     );
   }
 
-  Widget _buildDetailRow({
-    required IconData icon,
-    required String label,
-    required String value,
-  }) {
-    return Padding(
-      padding: const EdgeInsets.symmetric(vertical: 6),
-      child: Row(
-        children: [
-          Icon(icon, color: const Color(0xFFF4A261), size: 18),
-          const SizedBox(width: 10),
-          Text(
-            '$label: ',
+Widget _buildDetailRow({
+  required IconData icon,
+  required String label,
+  required String value,
+}) {
+  return Padding(
+    padding: const EdgeInsets.symmetric(vertical: 6),
+    child: Row(
+      children: [
+        Icon(icon, color: const Color(0xFFF4A261), size: 18),
+        const SizedBox(width: 10),
+        Text(
+          '$label: ',
+          style: GoogleFonts.poppins(
+            fontSize: 14,
+            color: const Color(0xFF757575),
+            fontWeight: FontWeight.w500,
+          ),
+        ),
+        Expanded(
+          child: Text(
+            value,
             style: GoogleFonts.poppins(
               fontSize: 14,
-              color: const Color(0xFF757575),
-              fontWeight: FontWeight.w500,
+              color: const Color(0xFF333333),
+              fontWeight: FontWeight.w400,
             ),
+            overflow: TextOverflow.ellipsis,
+            maxLines: 2,
           ),
-          Expanded(
-            child: Text(
-              value,
-              style: GoogleFonts.poppins(
-                fontSize: 14,
-                color: const Color(0xFF333333),
-                fontWeight: FontWeight.w400,
-              ),
-              overflow: TextOverflow.ellipsis,
-              maxLines: 2,
-            ),
-          ),
-        ],
-      ),
-    );
-  }
+        ),
+      ],
+    ),
+  );
+}
 
   Widget _buildSetScoreCard({
     required int setNumber,
@@ -1759,12 +1693,6 @@ List<Map<String, dynamic>> _getAllSetResults() {
                     : _match['player2']))
             : null;
 
-    final startTimeDisplay =
-        _matchStartTime != null && _isTimezoneInitialized
-            ? _formatDateWithTimezone(
-              _convertToTournamentTime(_matchStartTime!),
-            )
-            : 'Loading...';
 
     return AnnotatedRegion<SystemUiOverlayStyle>(
       value: const SystemUiOverlayStyle(
@@ -1898,11 +1826,13 @@ List<Map<String, dynamic>> _getAllSetResults() {
                                   ],
                                 ),
                               ),
-                              _buildDetailRow(
-                                icon: Icons.access_time,
-                                label: 'Start Time',
-                                value: startTimeDisplay,
-                              ),
+                             _buildDetailRow(
+  icon: Icons.access_time,
+  label: 'Start Time',
+  value: _matchStartTime != null && _isTimezoneInitialized
+      ? _formatDateWithTimezone(_convertToTournamentTime(_matchStartTime!))
+      : 'Not scheduled',
+),
                               _buildDetailRow(
                                 icon: Icons.schedule,
                                 label: 'Time Slot',
@@ -1913,12 +1843,18 @@ List<Map<String, dynamic>> _getAllSetResults() {
                                 label: 'Court',
                                 value: _match['court'] != null ? 'Court ${_match['court']}' : 'Not assigned',
                               ),
-                              if (_countdown != null)
-                                _buildDetailRow(
-                                  icon: Icons.timer,
-                                  label: 'Countdown',
-                                  value: _countdown!,
-                                ),
+                             if (_countdown == null && !_isTimezoneInitialized)
+                              _buildDetailRow(
+                                icon: Icons.timer,
+                                label: 'Countdown',
+                                value: 'Loading...',
+                              ),
+                             if (_countdown != null)
+                              _buildDetailRow(
+                                icon: Icons.timer,
+                                label: 'Countdown',
+                                value: _countdown!,
+                              ),
                               if (matchWinner != null)
                                 _buildDetailRow(
                                   icon: Icons.emoji_events,
@@ -1929,7 +1865,7 @@ List<Map<String, dynamic>> _getAllSetResults() {
                                 const SizedBox(height: 12),
                               if (widget.isCreator && !isLive && !isCompleted)
                                 _buildModernButton(
-                                  text: 'Update Start Time',
+                                  text: 'Update Schedule',
                                   gradient: const LinearGradient(
                                     colors: [
                                       Color(0xFF2A9D8F),

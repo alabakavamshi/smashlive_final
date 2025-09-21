@@ -9,6 +9,7 @@ import 'package:game_app/blocs/auth/auth_bloc.dart';
 import 'package:game_app/blocs/auth/auth_state.dart';
 import 'package:game_app/models/tournament.dart';
 import 'package:game_app/tournaments/match_details_page.dart';
+import 'package:game_app/widgets/timezone_utils.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:image_picker/image_picker.dart';
 import 'package:intl/intl.dart';
@@ -69,6 +70,7 @@ class _TournamentDetailsPageState extends State<TournamentDetailsPage>
   @override
   void initState() {
     super.initState();
+     _listenToMatchCompletions();
     _tabController = TabController(length: 5, vsync: this);
     _participants =
         widget.tournament.events[_selectedEventIndex].participants
@@ -100,6 +102,115 @@ class _TournamentDetailsPageState extends State<TournamentDetailsPage>
     _loadMatches();
     _listenToTournamentUpdates();
   }
+
+void _listenToMatchCompletions() {
+  FirebaseFirestore.instance
+      .collection('tournaments')
+      .doc(widget.tournament.id)
+      .collection('matches')
+      .where('eventId', isEqualTo: widget.tournament.events[_selectedEventIndex].name)
+      .snapshots()
+      .listen((snapshot) {
+    if (!mounted) return;
+    
+    for (var change in snapshot.docChanges) {
+      if (change.type == DocumentChangeType.modified) {
+        final matchData = change.doc.data() as Map<String, dynamic>;
+        if (matchData['completed'] == true) {
+          _updateNextRoundMatches(change.doc.id, matchData);
+        }
+      }
+    }
+  });
+}
+
+
+Future<void> _updateNextRoundMatches(String completedMatchId, Map<String, dynamic> matchData) async {
+  try {
+    final winner = matchData['winner'];
+    final isDoubles = matchData['matchType'].toString().toLowerCase().contains('doubles');
+    
+    // Find matches that reference this completed match as a previous match
+    final nextMatchesQuery = await FirebaseFirestore.instance
+        .collection('tournaments')
+        .doc(widget.tournament.id)
+        .collection('matches')
+        .where('eventId', isEqualTo: widget.tournament.events[_selectedEventIndex].name)
+        .where('completed', isEqualTo: false)
+        .get();
+
+    final batch = FirebaseFirestore.instance.batch();
+    bool hasUpdates = false;
+
+    for (var nextMatchDoc in nextMatchesQuery.docs) {
+      final nextMatchData = nextMatchDoc.data();
+      final nextMatchRef = nextMatchDoc.reference;
+      var shouldUpdate = false;
+      var updatedData = <String, dynamic>{};
+
+      if (nextMatchData['previousMatch1'] == completedMatchId) {
+        if (isDoubles) {
+          if (nextMatchData['wasTBDTeam1'] == true) {
+            updatedData['team1'] = winner == 'team1' ? matchData['team1'] : matchData['team2'];
+            updatedData['team1Ids'] = winner == 'team1' ? matchData['team1Ids'] : matchData['team2Ids'];
+            updatedData['team1Genders'] = winner == 'team1' ? matchData['team1Genders'] : matchData['team2Genders'];
+            updatedData['wasTBDTeam1'] = false;
+            shouldUpdate = true;
+          }
+        } else {
+          if (nextMatchData['wasTBD1'] == true) {
+            final winnerId = winner == 'player1' ? matchData['player1Id'] : matchData['player2Id'];
+            final winnerName = winner == 'player1' ? matchData['player1'] : matchData['player2'];
+            
+            updatedData['player1Id'] = winnerId;
+            updatedData['player1'] = winnerName;
+            updatedData['wasTBD1'] = false;
+            shouldUpdate = true;
+          }
+        }
+      }
+
+      if (nextMatchData['previousMatch2'] == completedMatchId) {
+        if (isDoubles) {
+          if (nextMatchData['wasTBDTeam2'] == true) {
+            updatedData['team2'] = winner == 'team1' ? matchData['team1'] : matchData['team2'];
+            updatedData['team2Ids'] = winner == 'team1' ? matchData['team1Ids'] : matchData['team2Ids'];
+            updatedData['team2Genders'] = winner == 'team1' ? matchData['team1Genders'] : matchData['team2Genders'];
+            updatedData['wasTBDTeam2'] = false;
+            shouldUpdate = true;
+          }
+        } else {
+          if (nextMatchData['wasTBD2'] == true) {
+            final winnerId = winner == 'player1' ? matchData['player1Id'] : matchData['player2Id'];
+            final winnerName = winner == 'player1' ? matchData['player1'] : matchData['player2'];
+            
+            updatedData['player2Id'] = winnerId;
+            updatedData['player2'] = winnerName;
+            updatedData['wasTBD2'] = false;
+            shouldUpdate = true;
+          }
+        }
+      }
+
+      if (shouldUpdate) {
+        batch.update(nextMatchRef, {
+          ...updatedData,
+          'lastUpdated': FieldValue.serverTimestamp(),
+        });
+        hasUpdates = true;
+      }
+    }
+
+    if (hasUpdates) {
+      await batch.commit();
+      // Reload matches to reflect changes
+      await _loadMatches();
+    }
+  } catch (e) {
+    debugPrint('Error updating next round matches: $e');
+  }
+}
+
 
   void _listenToTournamentUpdates() {
     // Listen to the tournament document
@@ -258,6 +369,124 @@ class _TournamentDetailsPageState extends State<TournamentDetailsPage>
     return updatedParticipants;
   }
 
+
+void _showEditMatchDialog(Map<String, dynamic> match, int matchIndex) {
+  final isDoubles = match['matchType'].toString().toLowerCase().contains('doubles');
+  final selectedEvent = widget.tournament.events[_selectedEventIndex];
+  
+  showDialog(
+    context: context,
+    builder: (context) => _EditMatchDialog(
+      match: match,
+      isDoubles: isDoubles,
+      tournamentId: widget.tournament.id,
+      eventName: selectedEvent.name,
+      participants: _participants,
+      availablePlayers: _getAvailablePlayersForEdit(match, isDoubles),
+      onSave: (updatedMatch) => _updateMatch(matchIndex, updatedMatch),
+      primaryColor: _primaryColor,
+      accentColor: _accentColor,
+      textColor: _textColor,
+      secondaryText: _secondaryText,
+      cardBackground: _cardBackground,
+      successColor: _successColor,
+    ),
+  );
+}
+
+
+List<Map<String, dynamic>> _getAvailablePlayersForEdit(Map<String, dynamic> match, bool isDoubles) {
+  final allParticipants = List<Map<String, dynamic>>.from(_participants);
+  final unavailablePlayers = <String>{};
+
+  // Get players already in other matches in the same round
+  final sameRoundMatches = _matches.where((m) => 
+      m['round'] == match['round'] && 
+      m['matchId'] != match['matchId'] &&
+      m['completed'] != true
+  ).toList();
+
+  for (var otherMatch in sameRoundMatches) {
+    if (isDoubles) {
+      final team1Ids = List<String>.from(otherMatch['team1Ids'] ?? []);
+      final team2Ids = List<String>.from(otherMatch['team2Ids'] ?? []);
+      unavailablePlayers.addAll(team1Ids);
+      unavailablePlayers.addAll(team2Ids);
+    } else {
+      unavailablePlayers.add(otherMatch['player1Id']);
+      unavailablePlayers.add(otherMatch['player2Id']);
+    }
+  }
+
+  // Also exclude players from the opposite side of the same match
+  if (isDoubles) {
+    if (match['wasTBDTeam1'] == true) {
+      final team2Ids = List<String>.from(match['team2Ids'] ?? []);
+      unavailablePlayers.addAll(team2Ids);
+    }
+    if (match['wasTBDTeam2'] == true) {
+      final team1Ids = List<String>.from(match['team1Ids'] ?? []);
+      unavailablePlayers.addAll(team1Ids);
+    }
+  } else {
+    if (match['wasTBD1'] == true) {
+      unavailablePlayers.add(match['player2Id']);
+    }
+    if (match['wasTBD2'] == true) {
+      unavailablePlayers.add(match['player1Id']);
+    }
+  }
+
+  return allParticipants.where((participant) => 
+      !unavailablePlayers.contains(participant['id'])
+  ).toList();
+}
+
+Future<void> _updateMatch(int matchIndex, Map<String, dynamic> updatedMatch) async {
+  setState(() {
+    _isLoading = true;
+  });
+
+  try {
+    final matchId = _matches[matchIndex]['matchId'];
+    await FirebaseFirestore.instance
+        .collection('tournaments')
+        .doc(widget.tournament.id)
+        .collection('matches')
+        .doc(matchId)
+        .update({
+          ...updatedMatch,
+          'lastUpdated': FieldValue.serverTimestamp(),
+        });
+
+    setState(() {
+      _matches[matchIndex] = {..._matches[matchIndex], ...updatedMatch};
+    });
+
+    toastification.show(
+      context: context,
+      type: ToastificationType.success,
+      title: const Text('Match Updated'),
+      description: const Text('Match details have been updated successfully.'),
+      autoCloseDuration: const Duration(seconds: 2),
+    );
+  } catch (e) {
+    toastification.show(
+      context: context,
+      type: ToastificationType.error,
+      title: const Text('Update Failed'),
+      description: Text('Failed to update match: $e'),
+      autoCloseDuration: const Duration(seconds: 2),
+    );
+  } finally {
+    setState(() {
+      _isLoading = false;
+    });
+  }
+}
+
+
+
   Future<void> _loadParticipants() async {
     if (_isLoading) return;
     setState(() {
@@ -370,125 +599,128 @@ class _TournamentDetailsPageState extends State<TournamentDetailsPage>
     return now.isAfter(widget.tournament.registrationEnd);
   }
 
-  Future<void> _resetMatches() async {
-    if (_isLoading || !_canGenerateMatches) return;
-    final confirmed = await showDialog<bool>(
-      context: context,
-      builder:
-          (context) => AlertDialog(
-            title: Text(
-              'Reset All Matches?',
-              style: GoogleFonts.poppins(
-                color: _textColor,
-                fontWeight: FontWeight.bold,
-              ),
-            ),
-            content: Text(
-              'This will delete all current matches for the selected event. This action cannot be undone.',
-              style: GoogleFonts.poppins(color: _secondaryText),
-            ),
-            actions: [
-              TextButton(
-                onPressed: () => Navigator.pop(context, false),
-                child: Text(
-                  'Cancel',
-                  style: GoogleFonts.poppins(color: _secondaryText),
-                ),
-              ),
-              TextButton(
-                onPressed: () => Navigator.pop(context, true),
-                child: Text(
-                  'Reset',
-                  style: GoogleFonts.poppins(
-                    color: _errorColor,
-                    fontWeight: FontWeight.w600,
-                  ),
-                ),
-              ),
-            ],
+
+bool get _hasStartedOrCompletedMatches {
+  return _matches.any((match) => 
+      match['completed'] == true || 
+      (match['liveScores'] != null && 
+       match['liveScores']['isLive'] == true) ||
+      (match['umpire'] != null && 
+       match['umpire']['name'] != null && 
+       match['umpire']['name'].toString().isNotEmpty));
+}
+
+
+
+Future<void> _resetMatches() async {
+  if (_isLoading || !_canGenerateMatches || _hasStartedOrCompletedMatches) return;
+  
+  final confirmed = await showDialog<bool>(
+    context: context,
+    builder: (context) => AlertDialog(
+      title: Text(
+        'Reset All Matches?',
+        style: GoogleFonts.poppins(
+          color: _textColor,
+          fontWeight: FontWeight.bold,
+        ),
+      ),
+      content: Text(
+        'This will delete all current matches and umpire assignments for the selected event. This action cannot be undone.',
+        style: GoogleFonts.poppins(color: _secondaryText),
+      ),
+      actions: [
+        TextButton(
+          onPressed: () => Navigator.pop(context, false),
+          child: Text(
+            'Cancel',
+            style: GoogleFonts.poppins(color: _secondaryText),
           ),
-    );
+        ),
+        TextButton(
+          onPressed: () => Navigator.pop(context, true),
+          child: Text(
+            'Reset',
+            style: GoogleFonts.poppins(
+              color: _errorColor,
+              fontWeight: FontWeight.w600,
+            ),
+          ),
+        ),
+      ],
+    ),
+  );
 
-    if (confirmed != true) return;
+  if (confirmed != true) return;
 
-    setState(() {
-      _isLoading = true;
-    });
+  setState(() {
+    _isLoading = true;
+  });
 
-    try {
-      final selectedEvent = widget.tournament.events[_selectedEventIndex];
-      final matchDocs =
-          await FirebaseFirestore.instance
-              .collection('tournaments')
-              .doc(widget.tournament.id)
-              .collection('matches')
-              .where('eventId', isEqualTo: selectedEvent.name)
-              .get();
+  try {
+    final selectedEvent = widget.tournament.events[_selectedEventIndex];
+    final matchDocs = await FirebaseFirestore.instance
+        .collection('tournaments')
+        .doc(widget.tournament.id)
+        .collection('matches')
+        .where('eventId', isEqualTo: selectedEvent.name)
+        .get();
 
-      // Delete all matches from Firestore
-      for (var doc in matchDocs.docs) {
-        await doc.reference.delete();
-      }
+    // Delete all matches from Firestore (this will also remove umpire assignments)
+    for (var doc in matchDocs.docs) {
+      await doc.reference.delete();
+    }
 
-      // CRITICAL FIX: Use local state values when updating Firestore
-      final updatedEvents =
-          widget.tournament.events.asMap().entries.map((entry) {
-            if (entry.key == _selectedEventIndex) {
-              return Event(
-                name: entry.value.name,
-                format: entry.value.format,
-                level: entry.value.level,
-                maxParticipants: entry.value.maxParticipants,
-                bornAfter: entry.value.bornAfter,
-                matchType: entry.value.matchType,
-                matches: [], // Reset matches to empty
-                participants: entry.value.participants,
-                // CRITICAL FIX: Preserve current local state values
-                numberOfCourts: _numberOfCourts,
-                timeSlots: List<String>.from(_timeSlots),
-              );
-            }
-            return entry.value;
-          }).toList();
+    // CRITICAL: Also clear any umpire assignments in the tournament document
+    // if they're stored there (adjust this based on your data structure)
+    final tournamentDoc = await FirebaseFirestore.instance
+        .collection('tournaments')
+        .doc(widget.tournament.id)
+        .get();
 
+    final tournamentData = tournamentDoc.data();
+    if (tournamentData != null && tournamentData.containsKey('umpireAssignments')) {
       await FirebaseFirestore.instance
           .collection('tournaments')
           .doc(widget.tournament.id)
           .update({
-            'events': updatedEvents.map((e) => e.toFirestore()).toList(),
+            'umpireAssignments': FieldValue.delete(),
             'lastUpdated': FieldValue.serverTimestamp(),
           });
+    }
 
-      if (mounted) {
-        setState(() {
-          _matches = [];
-        });
-        toastification.show(
-          context: context,
-          type: ToastificationType.success,
-          title: const Text('Matches Reset'),
-          description: const Text('All matches have been successfully reset.'),
-          autoCloseDuration: const Duration(seconds: 2),
-        );
-      }
-    } catch (e) {
-      if (mounted) {
-        toastification.show(
-          context: context,
-          type: ToastificationType.error,
-          title: const Text('Reset Failed'),
-          description: Text('Failed to reset matches: $e'),
-          autoCloseDuration: const Duration(seconds: 2),
-        );
-      }
-    } finally {
-      if (mounted) {
-        setState(() {
-          _isLoading = false;
-        });
-      }
+    // Update local state
+    if (mounted) {
+      setState(() {
+        _matches = [];
+      });
+      toastification.show(
+        context: context,
+        type: ToastificationType.success,
+        title: const Text('Matches Reset'),
+        description: const Text('All matches and umpire assignments have been successfully reset.'),
+        autoCloseDuration: const Duration(seconds: 2),
+      );
+    }
+  } catch (e) {
+    if (mounted) {
+      toastification.show(
+        context: context,
+        type: ToastificationType.error,
+        title: const Text('Reset Failed'),
+        description: Text('Failed to reset matches: $e'),
+        autoCloseDuration: const Duration(seconds: 2),
+      );
+    }
+  } finally {
+    if (mounted) {
+      setState(() {
+        _isLoading = false;
+      });
     }
   }
+}
+
 
   Future<void> _uploadTournamentImage() async {
     if (_isLoading) return;
@@ -1559,9 +1791,12 @@ class _TournamentDetailsPageState extends State<TournamentDetailsPage>
     return false;
   }
 
-  Future<void> _generateMatches() async {
+// Add these methods to the _TournamentDetailsPageState class
+
+// Update the _generateMatches method's switch statement to include new formats
+Future<void> _generateMatches() async {
   if (_isLoading || !_canGenerateMatches) return;
-  
+
   setState(() {
     _isLoading = true;
   });
@@ -1579,11 +1814,11 @@ class _TournamentDetailsPageState extends State<TournamentDetailsPage>
     if (isDoubles && selectedEvent.matchType.toLowerCase().contains('mixed')) {
       final maleCount = await _countParticipantsByGender(competitors, 'male');
       final femaleCount = await _countParticipantsByGender(competitors, 'female');
-      
+
       if (maleCount == 0 || femaleCount == 0) {
         throw 'Mixed doubles requires both male and female participants. Current: $maleCount males, $femaleCount females.';
       }
-      
+
       if (math.min(maleCount, femaleCount) < 1) {
         throw 'Need at least 1 male and 1 female participant for mixed doubles teams.';
       }
@@ -1598,15 +1833,14 @@ class _TournamentDetailsPageState extends State<TournamentDetailsPage>
     }
 
     List<Map<String, dynamic>> competitorsList;
-    
+
     if (isDoubles) {
-      // Create teams using enhanced logic
       competitorsList = await _createDoublesTeams(competitors, selectedEvent.matchType);
       
       if (competitorsList.isEmpty) {
         throw 'Unable to create teams. Please ensure proper gender distribution for mixed doubles.';
       }
-      
+
       if (competitorsList.length < 2) {
         throw 'Need at least 2 teams to schedule matches. Only ${competitorsList.length} team(s) could be formed.';
       }
@@ -1615,53 +1849,74 @@ class _TournamentDetailsPageState extends State<TournamentDetailsPage>
     }
 
     final newMatches = <Map<String, dynamic>>[];
-    final totalDays = widget.tournament.endDate.difference(widget.tournament.startDate).inDays + 1;
-    
-    // Track scheduling
-    int currentDay = 0;
     int currentTimeSlotIndex = 0;
     int currentCourt = 1;
 
+    // Updated switch statement with new formats
     switch (selectedEvent.format.toLowerCase()) {
       case 'knockout':
         await _generateKnockoutMatches(
-          competitorsList, 
-          isDoubles, 
-          selectedEvent, 
-          newMatches,
-          currentDay,
-          currentTimeSlotIndex,
-          currentCourt,
-          totalDays,
+          competitorsList, isDoubles, selectedEvent, newMatches,
+          currentTimeSlotIndex, currentCourt,
         );
         break;
-        
+
       case 'round-robin':
         await _generateRoundRobinMatches(
-          competitorsList,
-          isDoubles,
-          selectedEvent,
-          newMatches,
-          currentDay,
-          currentTimeSlotIndex,
-          currentCourt,
-          totalDays,
+          competitorsList, isDoubles, selectedEvent, newMatches,
+          currentTimeSlotIndex, currentCourt,
         );
         break;
-        
+
+      case 'swiss format':
+        await _generateSwissFormatMatches(
+          competitorsList, isDoubles, selectedEvent, newMatches,
+          currentTimeSlotIndex, currentCourt,
+        );
+        break;
+
+      case 'ladder':
+        await _generateLadderMatches(
+          competitorsList, isDoubles, selectedEvent, newMatches,
+          currentTimeSlotIndex, currentCourt,
+        );
+        break;
+
+      case 'double elimination':
+        await _generateDoubleEliminationMatches(
+          competitorsList, isDoubles, selectedEvent, newMatches,
+          currentTimeSlotIndex, currentCourt,
+        );
+        break;
+
+      case 'group + knockout':
+        await _generateGroupKnockoutMatches(
+          competitorsList, isDoubles, selectedEvent, newMatches,
+          currentTimeSlotIndex, currentCourt,
+        );
+        break;
+
+      case 'team format':
+        // Team format is same as mixed doubles, already handled above
+        await _generateRoundRobinMatches(
+          competitorsList, isDoubles, selectedEvent, newMatches,
+          currentTimeSlotIndex, currentCourt,
+        );
+        break;
+
       default:
         throw 'Unsupported tournament format: ${selectedEvent.format}';
     }
 
     // Save matches to Firestore
     await _saveMatchesToFirestore(newMatches, selectedEvent);
-    
+
     if (mounted) {
       setState(() {
         _matches = newMatches;
       });
       await _generateLeaderboardData();
-      
+
       toastification.show(
         context: context,
         type: ToastificationType.success,
@@ -1672,7 +1927,6 @@ class _TournamentDetailsPageState extends State<TournamentDetailsPage>
         autoCloseDuration: const Duration(seconds: 3),
       );
     }
-    
   } catch (e) {
     if (mounted) {
       toastification.show(
@@ -1692,250 +1946,554 @@ class _TournamentDetailsPageState extends State<TournamentDetailsPage>
   }
 }
 
-// Helper function to count participants by gender
-Future<int> _countParticipantsByGender(
-  List<Map<String, dynamic>> participants, 
-  String targetGender,
+// Swiss Format Implementation
+Future<void> _generateSwissFormatMatches(
+  List<Map<String, dynamic>> competitors,
+  bool isDoubles,
+  Event selectedEvent,
+  List<Map<String, dynamic>> newMatches,
+  int currentTimeSlotIndex,
+  int currentCourt,
 ) async {
-  int count = 0;
-  for (var participant in participants) {
-    final userDetails = await _getUserDetails(participant['id']);
-    if (userDetails['gender'] == targetGender) {
-      count++;
+  final participantCount = competitors.length;
+  
+  // Calculate number of rounds (typically log2 of participants, minimum 3)
+  final numberOfRounds = math.max(3, (math.log(participantCount) / math.log(2)).ceil());
+  
+  // Track player scores and opponents faced
+  final playerScores = <String, int>{};
+  final playerOpponents = <String, Set<String>>{};
+  
+  // Initialize tracking
+  for (var competitor in competitors) {
+    final id = isDoubles ? competitor['teamId'] : competitor['id'];
+    playerScores[id] = 0;
+    playerOpponents[id] = <String>{};
+  }
+
+  for (int round = 1; round <= numberOfRounds; round++) {
+    List<Map<String, dynamic>> availableCompetitors = List.from(competitors);
+    List<Map<String, dynamic>> roundMatches = [];
+
+    if (round == 1) {
+      // First round: random or seeded pairing
+      availableCompetitors.shuffle();
+    } else {
+      // Subsequent rounds: pair by similar scores
+      availableCompetitors.sort((a, b) {
+        final aId = isDoubles ? a['teamId'] : a['id'];
+        final bId = isDoubles ? b['teamId'] : b['id'];
+        final aScore = playerScores[aId] ?? 0;
+        final bScore = playerScores[bId] ?? 0;
+        return bScore.compareTo(aScore); // Higher scores first
+      });
+    }
+
+    // Pair players for this round
+    while (availableCompetitors.length >= 2) {
+      Map<String, dynamic>? player1;
+      Map<String, dynamic>? player2;
+
+      // Find a valid pairing
+      for (int i = 0; i < availableCompetitors.length; i++) {
+        player1 = availableCompetitors[i];
+        final player1Id = isDoubles ? player1['teamId'] : player1['id'];
+
+        for (int j = i + 1; j < availableCompetitors.length; j++) {
+          player2 = availableCompetitors[j];
+          final player2Id = isDoubles ? player2['teamId'] : player2['id'];
+
+          // Check if they haven't played before
+          if (!playerOpponents[player1Id]!.contains(player2Id)) {
+            // Valid pairing found
+            availableCompetitors.removeAt(j); // Remove j first (higher index)
+            availableCompetitors.removeAt(i); // Then remove i
+            
+            // Record that they've played each other
+            playerOpponents[player1Id]!.add(player2Id);
+            playerOpponents[player2Id]!.add(player1Id);
+            
+            break;
+          }
+          player2 = null; // Reset if not valid
+        }
+        
+        if (player2 != null) break; // Found a pairing
+        player1 = null; // Reset if no pairing found
+      }
+
+      if (player1 != null && player2 != null) {
+        final matchData = await _createMatchData(
+          player1, player2, selectedEvent, round, roundMatches.length + 1,
+          currentTimeSlotIndex, currentCourt, isDoubles,
+        );
+
+        roundMatches.add(matchData);
+        
+        // Update scheduling positions
+        final scheduleUpdate = _updateSchedulePosition(currentCourt, currentTimeSlotIndex);
+        currentCourt = scheduleUpdate['court']!;
+        currentTimeSlotIndex = scheduleUpdate['timeSlotIndex']!;
+      } else {
+        // No valid pairing found for remaining players
+        break;
+      }
+    }
+
+    // Handle bye if odd number of players
+    if (availableCompetitors.length == 1) {
+      final byePlayer = availableCompetitors.first;
+      final byeMatchData = await _createByeMatch(
+        byePlayer, selectedEvent, round, currentTimeSlotIndex, currentCourt, isDoubles,
+      );
+      
+      roundMatches.add(byeMatchData);
+      
+      // Award point for bye
+      final byeId = isDoubles ? byePlayer['teamId'] : byePlayer['id'];
+      playerScores[byeId] = (playerScores[byeId] ?? 0) + 1;
+    }
+
+    newMatches.addAll(roundMatches);
+
+    // Update scores based on match results (simulate for now, will be updated when matches are completed)
+    // In a real implementation, this would be done when match results are entered
+    for (var match in roundMatches) {
+      if (match['isBye'] == true) continue; // Skip bye matches
+      
+      // For now, we'll leave scores at 0 until matches are actually played
+      // The scoring will be handled in the match completion logic
     }
   }
-  return count;
 }
 
-
-Future<void> _createManualMatch(
-  dynamic competitor1,
-  dynamic competitor2,
-  DateTime matchDateTime,
-  int court,
-  String timeSlot,
+// Ladder Tournament Implementation  
+Future<void> _generateLadderMatches(
+  List<Map<String, dynamic>> competitors,
+  bool isDoubles,
+  Event selectedEvent,
+  List<Map<String, dynamic>> newMatches,
+  int currentTimeSlotIndex,
+  int currentCourt,
 ) async {
-  if (_isLoading) return;
+  // Initialize ladder rankings (can be random or based on some criteria)
+  final ladderRankings = List<Map<String, dynamic>>.from(competitors);
   
-  setState(() {
-    _isLoading = true;
-  });
+  // Shuffle to create initial random ladder positions
+  // In a real implementation, you might want to seed based on player ratings
+  ladderRankings.shuffle();
 
+  // For initial setup, create some challenge matches
+  // In a real ladder system, these would be ongoing based on player challenges
+  
+  final maxChallengeDistance = math.min(3, ladderRankings.length - 1); // Can challenge up to 3 positions above
+  
+  for (int challengerIndex = 1; challengerIndex < ladderRankings.length; challengerIndex++) {
+    // Each player can challenge someone above them
+    final challenger = ladderRankings[challengerIndex];
+    
+    // Randomly select someone above them to challenge (within challenge distance)
+    final maxTargetIndex = math.max(0, challengerIndex - maxChallengeDistance);
+    final targetIndex = math.Random().nextInt(challengerIndex - maxTargetIndex) + maxTargetIndex;
+    final target = ladderRankings[targetIndex];
+
+    final matchData = await _createMatchData(
+      challenger, target, selectedEvent, 1, newMatches.length + 1,
+      currentTimeSlotIndex, currentCourt, isDoubles,
+    );
+
+    // Add ladder-specific metadata
+    matchData['ladderChallenge'] = true;
+    matchData['challengerPosition'] = challengerIndex + 1;
+    matchData['targetPosition'] = targetIndex + 1;
+    matchData['description'] = 'Ladder Challenge: Position ${challengerIndex + 1} challenges Position ${targetIndex + 1}';
+
+    newMatches.add(matchData);
+
+    // Update scheduling positions
+    final scheduleUpdate = _updateSchedulePosition(currentCourt, currentTimeSlotIndex);
+    currentCourt = scheduleUpdate['court']!;
+    currentTimeSlotIndex = scheduleUpdate['timeSlotIndex']!;
+    
+    // Limit initial challenges to avoid too many matches
+    if (newMatches.length >= competitors.length) break;
+  }
+}
+
+// Double Elimination Implementation (placeholder - needs your specification)
+Future<void> _generateDoubleEliminationMatches(
+  List<Map<String, dynamic>> competitors,
+  bool isDoubles,
+  Event selectedEvent,
+  List<Map<String, dynamic>> newMatches,
+  int currentTimeSlotIndex,
+  int currentCourt,
+) async {
+  // TODO: Implement double elimination with winners and losers brackets
+  // Need clarification on the exact structure you want
+  throw 'Double Elimination format needs specification - please provide details on winners/losers bracket structure';
+}
+
+// Group + Knockout Implementation (placeholder - needs your specification)
+Future<void> _generateGroupKnockoutMatches(
+  List<Map<String, dynamic>> competitors,
+  bool isDoubles,
+  Event selectedEvent,
+  List<Map<String, dynamic>> newMatches,
+  int currentTimeSlotIndex,
+  int currentCourt,
+) async {
+  // TODO: Implement group stage followed by knockout
+  // Need clarification on group size, advancement rules, etc.
+  throw 'Group + Knockout format needs specification - please provide details on group size and advancement rules';
+}
+
+// Helper method to update Swiss format scores when matches are completed
+Future<void> _updateSwissFormatScores(String matchId, String winner) async {
+  // This would be called when a Swiss format match is completed
+  // Update the player scores in the database
   try {
-    final selectedEvent = widget.tournament.events[_selectedEventIndex];
-    final isDoubles = selectedEvent.matchType.toLowerCase().contains('doubles');
-    
-    // Validate teams for mixed doubles
-    if (isDoubles && selectedEvent.matchType.toLowerCase().contains('mixed')) {
-      await _validateMixedDoublesTeams(competitor1, competitor2);
-    }
-    
-    String matchId;
-    Map<String, dynamic> newMatch;
-
-    if (isDoubles) {
-      final team1Ids = competitor1['playerIds'] as List<String>;
-      final team2Ids = competitor2['playerIds'] as List<String>;
-      matchId = '${selectedEvent.name}_manual_${team1Ids.join('_')}_vs_${team2Ids.join('_')}_${DateTime.now().millisecondsSinceEpoch}';
-      
-      newMatch = {
-        'matchId': matchId,
-        'eventId': selectedEvent.name,
-        'matchType': selectedEvent.matchType,
-        'round': _matches.isNotEmpty ? (_matches.last['round'] ?? 1) : 1,
-        'team1': competitor1['playerNames'],
-        'team2': competitor2['playerNames'],
-        'team1Ids': team1Ids,
-        'team2Ids': team2Ids,
-        'team1Genders': competitor1['playerGenders'] ?? ['unknown', 'unknown'],
-        'team2Genders': competitor2['playerGenders'] ?? ['unknown', 'unknown'],
-        'teamType1': competitor1['teamType'] ?? 'manual',
-        'teamType2': competitor2['teamType'] ?? 'manual',
-        'completed': false,
-        'winner': null,
-        'umpire': {'name': '', 'email': '', 'phone': ''},
-        'liveScores': {
-          'team1': [0, 0, 0],
-          'team2': [0, 0, 0],
-          'currentGame': 1,
-          'isLive': false,
-          'currentServer': 'team1',
-        },
-        'startTime': Timestamp.fromDate(matchDateTime),
-        'court': court,
-        'timeSlot': timeSlot,
-        'lastUpdated': FieldValue.serverTimestamp(),
-      };
-    } else {
-      matchId = '${selectedEvent.name}_manual_${competitor1['id']}_vs_${competitor2['id']}_${DateTime.now().millisecondsSinceEpoch}';
-      
-      newMatch = {
-        'matchId': matchId,
-        'eventId': selectedEvent.name,
-        'matchType': selectedEvent.matchType,
-        'round': _matches.isNotEmpty ? (_matches.last['round'] ?? 1) : 1,
-        'player1': competitor1['name'] ?? await _getDisplayName(competitor1['id']),
-        'player2': competitor2['name'] ?? await _getDisplayName(competitor2['id']),
-        'player1Id': competitor1['id'],
-        'player2Id': competitor2['id'],
-        'completed': false,
-        'winner': null,
-        'umpire': {'name': '', 'email': '', 'phone': ''},
-        'liveScores': {
-          'player1': [0, 0, 0],
-          'player2': [0, 0, 0],
-          'currentGame': 1,
-          'isLive': false,
-          'currentServer': 'player1',
-        },
-        'startTime': Timestamp.fromDate(matchDateTime),
-        'court': court,
-        'timeSlot': timeSlot,
-        'lastUpdated': FieldValue.serverTimestamp(),
-      };
-    }
-
-    await FirebaseFirestore.instance
+    final matchDoc = await FirebaseFirestore.instance
         .collection('tournaments')
         .doc(widget.tournament.id)
         .collection('matches')
         .doc(matchId)
-        .set(newMatch);
+        .get();
 
-    final updatedEvents = widget.tournament.events.asMap().entries.map((entry) {
-      if (entry.key == _selectedEventIndex) {
-        return Event(
-          name: entry.value.name,
-          format: entry.value.format,
-          level: entry.value.level,
-          maxParticipants: entry.value.maxParticipants,
-          bornAfter: entry.value.bornAfter,
-          matchType: entry.value.matchType,
-          matches: [...entry.value.matches, matchId],
-          participants: entry.value.participants,
-          numberOfCourts: entry.value.numberOfCourts,
-          timeSlots: entry.value.timeSlots,
-        );
-      }
-      return entry.value;
-    }).toList();
-
-    await FirebaseFirestore.instance
-        .collection('tournaments')
-        .doc(widget.tournament.id)
-        .update({
-      'events': updatedEvents.map((e) => e.toFirestore()).toList(),
-      'lastUpdated': FieldValue.serverTimestamp(),
-    });
-
-    if (mounted) {
-      setState(() {
-        _matches.add(newMatch);
-      });
-      await _generateLeaderboardData();
+    if (matchDoc.exists) {
+      final matchData = matchDoc.data()!;
       
-      toastification.show(
-        context: context,
-        type: ToastificationType.success,
-        title: const Text('Match Created'),
-        description: Text(
-          'Manual ${isDoubles ? 'doubles' : 'singles'} match has been successfully created!',
-        ),
-        autoCloseDuration: const Duration(seconds: 2),
-      );
+      // Update Swiss format scores
+      // This is a simplified version - you might want more sophisticated scoring
+      if (matchData['eventId'] == widget.tournament.events[_selectedEventIndex].name) {
+        // Add Swiss scoring logic here
+        // For example, update a separate collection to track Swiss standings
+      }
     }
   } catch (e) {
-    if (mounted) {
+    debugPrint('Error updating Swiss format scores: $e');
+  }
+}
+
+// Helper method to handle ladder position swapping
+Future<void> _handleLadderMatchResult(String matchId, String winner) async {
+  // This would be called when a ladder match is completed
+  try {
+    final matchDoc = await FirebaseFirestore.instance
+        .collection('tournaments')
+        .doc(widget.tournament.id)
+        .collection('matches')
+        .doc(matchId)
+        .get();
+
+    if (matchDoc.exists) {
+      final matchData = matchDoc.data()!;
+      
+      if (matchData['ladderChallenge'] == true) {
+        // Handle ladder position swapping logic
+        final challengerPosition = matchData['challengerPosition'] as int;
+        final targetPosition = matchData['targetPosition'] as int;
+        
+        // If challenger wins, they swap positions
+        // Implementation would depend on how you store ladder rankings
+        // You might want a separate collection for ladder standings
+        
+        debugPrint('Ladder match result: Challenger at position $challengerPosition vs Target at position $targetPosition');
+      }
+    }
+  } catch (e) {
+    debugPrint('Error handling ladder match result: $e');
+  }
+}
+
+  // Helper function to count participants by gender
+  Future<int> _countParticipantsByGender(
+    List<Map<String, dynamic>> participants,
+    String targetGender,
+  ) async {
+    int count = 0;
+    for (var participant in participants) {
+      final userDetails = await _getUserDetails(participant['id']);
+      if (userDetails['gender'] == targetGender) {
+        count++;
+      }
+    }
+    return count;
+  }
+
+  Future<void> _createManualMatch(
+    dynamic competitor1,
+    dynamic competitor2,
+    int court,
+    String timeSlot,
+  ) async {
+    if (_isLoading) return;
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      final selectedEvent = widget.tournament.events[_selectedEventIndex];
+      final isDoubles = selectedEvent.matchType.toLowerCase().contains(
+        'doubles',
+      );
+
+      // Validate teams for mixed doubles
+      if (isDoubles &&
+          selectedEvent.matchType.toLowerCase().contains('mixed')) {
+        await _validateMixedDoublesTeams(competitor1, competitor2);
+      }
+
+      // Parse the time slot to create a proper DateTime
+      DateTime? startTime;
+      try {
+        // Get tournament start date
+        final tournamentDoc =
+            await FirebaseFirestore.instance
+                .collection('tournaments')
+                .doc(widget.tournament.id)
+                .get();
+
+        final data = tournamentDoc.data();
+        final tournamentStartDate =
+            (data?['startDate'] as Timestamp?)?.toDate() ?? DateTime.now();
+
+        // Parse time slot (format: "HH:mm-HH:mm")
+        final timeParts = timeSlot.split('-');
+        if (timeParts.length == 2) {
+          final startTimeParts = timeParts[0].trim().split(':');
+          if (startTimeParts.length == 2) {
+            final hour = int.tryParse(startTimeParts[0]);
+            final minute = int.tryParse(startTimeParts[1]);
+
+            if (hour != null && minute != null) {
+              // Create start time using tournament start date with the time slot time
+              startTime = DateTime(
+                tournamentStartDate.year,
+                tournamentStartDate.month,
+                tournamentStartDate.day,
+                hour,
+                minute,
+              );
+            }
+          }
+        }
+      } catch (e) {
+        debugPrint('Error parsing time slot for manual match: $e');
+      }
+
+      String matchId;
+      Map<String, dynamic> newMatch;
+
+      if (isDoubles) {
+        final team1Ids = competitor1['playerIds'] as List<String>;
+        final team2Ids = competitor2['playerIds'] as List<String>;
+        matchId =
+            '${selectedEvent.name}_manual_${team1Ids.join('_')}_vs_${team2Ids.join('_')}_${DateTime.now().millisecondsSinceEpoch}';
+
+        newMatch = {
+          'matchId': matchId,
+          'eventId': selectedEvent.name,
+          'matchType': selectedEvent.matchType,
+          'round': _matches.isNotEmpty ? (_matches.last['round'] ?? 1) : 1,
+          'team1': competitor1['playerNames'],
+          'team2': competitor2['playerNames'],
+          'team1Ids': team1Ids,
+          'team2Ids': team2Ids,
+          'team1Genders':
+              competitor1['playerGenders'] ?? ['unknown', 'unknown'],
+          'team2Genders':
+              competitor2['playerGenders'] ?? ['unknown', 'unknown'],
+          'teamType1': competitor1['teamType'] ?? 'manual',
+          'teamType2': competitor2['teamType'] ?? 'manual',
+          'completed': false,
+          'winner': null,
+          'umpire': {'name': '', 'email': '', 'phone': ''},
+          'liveScores': {
+            'team1': [0, 0, 0],
+            'team2': [0, 0, 0],
+            'currentGame': 1,
+            'isLive': false,
+            'currentServer': 'team1',
+          },
+          'court': court,
+          'timeSlot': timeSlot,
+          'startTime':
+              startTime != null ? Timestamp.fromDate(startTime.toUtc()) : null,
+          'lastUpdated': FieldValue.serverTimestamp(),
+        };
+      } else {
+        matchId =
+            '${selectedEvent.name}_manual_${competitor1['id']}_vs_${competitor2['id']}_${DateTime.now().millisecondsSinceEpoch}';
+
+        newMatch = {
+          'matchId': matchId,
+          'eventId': selectedEvent.name,
+          'matchType': selectedEvent.matchType,
+          'round': _matches.isNotEmpty ? (_matches.last['round'] ?? 1) : 1,
+          'player1':
+              competitor1['name'] ?? await _getDisplayName(competitor1['id']),
+          'player2':
+              competitor2['name'] ?? await _getDisplayName(competitor2['id']),
+          'player1Id': competitor1['id'],
+          'player2Id': competitor2['id'],
+          'completed': false,
+          'winner': null,
+          'umpire': {'name': '', 'email': '', 'phone': ''},
+          'liveScores': {
+            'player1': [0, 0, 0],
+            'player2': [0, 0, 0],
+            'currentGame': 1,
+            'isLive': false,
+            'currentServer': 'player1',
+          },
+          'court': court,
+          'timeSlot': timeSlot,
+          'startTime':
+              startTime != null ? Timestamp.fromDate(startTime.toUtc()) : null,
+          'lastUpdated': FieldValue.serverTimestamp(),
+        };
+      }
+
+      await FirebaseFirestore.instance
+          .collection('tournaments')
+          .doc(widget.tournament.id)
+          .collection('matches')
+          .doc(matchId)
+          .set(newMatch);
+
+      final updatedEvents =
+          widget.tournament.events.asMap().entries.map((entry) {
+            if (entry.key == _selectedEventIndex) {
+              return Event(
+                name: entry.value.name,
+                format: entry.value.format,
+                level: entry.value.level,
+                maxParticipants: entry.value.maxParticipants,
+                bornAfter: entry.value.bornAfter,
+                matchType: entry.value.matchType,
+                matches: [...entry.value.matches, matchId],
+                participants: entry.value.participants,
+                numberOfCourts: entry.value.numberOfCourts,
+                timeSlots: entry.value.timeSlots,
+              );
+            }
+            return entry.value;
+          }).toList();
+
+      await FirebaseFirestore.instance
+          .collection('tournaments')
+          .doc(widget.tournament.id)
+          .update({
+            'events': updatedEvents.map((e) => e.toFirestore()).toList(),
+            'lastUpdated': FieldValue.serverTimestamp(),
+          });
+
+      if (mounted) {
+        setState(() {
+          _matches.add(newMatch);
+        });
+        await _generateLeaderboardData();
+
+        toastification.show(
+          context: context,
+          type: ToastificationType.success,
+          title: const Text('Match Created'),
+          description: Text(
+            'Manual ${isDoubles ? 'doubles' : 'singles'} match has been successfully created and scheduled for ${startTime != null ? DateFormat('MMM dd, yyyy • HH:mm').format(startTime) : timeSlot}!',
+          ),
+          autoCloseDuration: const Duration(seconds: 3),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        toastification.show(
+          context: context,
+          type: ToastificationType.error,
+          title: const Text('Error'),
+          description: Text('Failed to create match: $e'),
+          autoCloseDuration: const Duration(seconds: 2),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
+    }
+  }
+
+  Future<void> _validateMixedDoublesTeams(
+    Map<String, dynamic> team1,
+    Map<String, dynamic> team2,
+  ) async {
+    final team1Genders = team1['playerGenders'] as List<String>?;
+    final team2Genders = team2['playerGenders'] as List<String>?;
+
+    // Check if both teams have proper gender distribution for mixed doubles
+    if (team1Genders != null && team1Genders.length == 2) {
+      final team1HasMale = team1Genders.contains('male');
+      final team1HasFemale = team1Genders.contains('female');
+
+      if (!team1HasMale || !team1HasFemale) {
+        throw 'Team 1 must have one male and one female player for mixed doubles';
+      }
+    }
+
+    if (team2Genders != null && team2Genders.length == 2) {
+      final team2HasMale = team2Genders.contains('male');
+      final team2HasFemale = team2Genders.contains('female');
+
+      if (!team2HasMale || !team2HasFemale) {
+        throw 'Team 2 must have one male and one female player for mixed doubles';
+      }
+    }
+  }
+
+  // MODIFIED: Remove date/time selection from manual match dialog
+  void _showManualMatchDialog(bool isCreator) {
+    if (!isCreator || !_canGenerateMatches) return;
+
+    final selectedEvent = widget.tournament.events[_selectedEventIndex];
+    final isDoubles = selectedEvent.matchType.toLowerCase().contains('doubles');
+    final isMixed = selectedEvent.matchType.toLowerCase().contains('mixed');
+    final competitors = List<Map<String, dynamic>>.from(_participants);
+
+    if (competitors.length < 2) {
       toastification.show(
         context: context,
         type: ToastificationType.error,
-        title: const Text('Error'),
-        description: Text('Failed to create match: $e'),
-        autoCloseDuration: const Duration(seconds: 2),
+        title: const Text('Insufficient Participants'),
+        description: Text(
+          'At least ${isDoubles ? 'four players (for two teams)' : 'two players'} are required to create a match.',
+        ),
+        autoCloseDuration: const Duration(seconds: 3),
       );
+      return;
     }
-  } finally {
-    if (mounted) {
-      setState(() {
-        _isLoading = false;
-      });
-    }
-  }
-}
 
-Future<void> _validateMixedDoublesTeams(
-  Map<String, dynamic> team1,
-  Map<String, dynamic> team2,
-) async {
-  final team1Genders = team1['playerGenders'] as List<String>?;
-  final team2Genders = team2['playerGenders'] as List<String>?;
-  
-  // Check if both teams have proper gender distribution for mixed doubles
-  if (team1Genders != null && team1Genders.length == 2) {
-    final team1HasMale = team1Genders.contains('male');
-    final team1HasFemale = team1Genders.contains('female');
-    
-    if (!team1HasMale || !team1HasFemale) {
-      throw 'Team 1 must have one male and one female player for mixed doubles';
-    }
-  }
-  
-  if (team2Genders != null && team2Genders.length == 2) {
-    final team2HasMale = team2Genders.contains('male');
-    final team2HasFemale = team2Genders.contains('female');
-    
-    if (!team2HasMale || !team2HasFemale) {
-      throw 'Team 2 must have one male and one female player for mixed doubles';
-    }
-  }
-}
-
-
-
-
-  void _showManualMatchDialog(bool isCreator) {
-  if (!isCreator || !_canGenerateMatches) return;
-  
-  final selectedEvent = widget.tournament.events[_selectedEventIndex];
-  final isDoubles = selectedEvent.matchType.toLowerCase().contains('doubles');
-  final isMixed = selectedEvent.matchType.toLowerCase().contains('mixed');
-  final competitors = List<Map<String, dynamic>>.from(_participants);
-
-  if (competitors.length < 2) {
-    toastification.show(
+    showDialog(
       context: context,
-      type: ToastificationType.error,
-      title: const Text('Insufficient Participants'),
-      description: Text(
-        'At least ${isDoubles ? 'four players (for two teams)' : 'two players'} are required to create a match.',
-      ),
-      autoCloseDuration: const Duration(seconds: 3),
+      builder:
+          (_) => _ManualMatchDialog(
+            competitors: competitors,
+            selectedEvent: selectedEvent,
+            isDoubles: isDoubles,
+            isMixed: isMixed,
+            onCreateMatch: (competitor1, competitor2, court, timeSlot) {
+              _createManualMatch(competitor1, competitor2, court, timeSlot);
+            },
+            primaryColor: _primaryColor,
+            accentColor: _accentColor,
+            textColor: _textColor,
+            secondaryText: _secondaryText,
+            cardBackground: _cardBackground,
+            successColor: _successColor,
+          ),
     );
-    return;
   }
-
-  showDialog(
-    context: context,
-    builder: (_) => _ManualMatchDialog(
-      competitors: competitors,
-      selectedEvent: selectedEvent,
-      isDoubles: isDoubles,
-      isMixed: isMixed,
-      onCreateMatch: _createManualMatch,
-      primaryColor: _primaryColor,
-      accentColor: _accentColor,
-      textColor: _textColor,
-      secondaryText: _secondaryText,
-      cardBackground: _cardBackground,
-      successColor: _successColor,
-    ),
-  );
-}
-
-  
-  
-  
-
 
   Future<void> _deleteMatch(int matchIndex) async {
     if (_isLoading) return;
@@ -2169,306 +2727,306 @@ Future<void> _validateMixedDoublesTeams(
     }
   }
 
-  
- String _extractGenderFromMatchType(String matchType) {
-  final lowerType = matchType.toLowerCase();
-  if (lowerType.contains("men's") && !lowerType.contains("women's")) {
-    return 'male';
-  } else if (lowerType.contains("women's") || lowerType.contains("ladies")) {
-    return 'female';
-  } else if (lowerType.contains('mixed')) {
-    return 'mixed';
+  String _extractGenderFromMatchType(String matchType) {
+    final lowerType = matchType.toLowerCase();
+    if (lowerType.contains("men's") && !lowerType.contains("women's")) {
+      return 'male';
+    } else if (lowerType.contains("women's") || lowerType.contains("ladies")) {
+      return 'female';
+    } else if (lowerType.contains('mixed')) {
+      return 'mixed';
+    }
+    return 'open';
   }
-  return 'open';
-}
 
-
-
-
- Future<Map<String, dynamic>> _getUserDetails(String userId) async {
-  try {
-    final userDoc = await FirebaseFirestore.instance
-        .collection('users')
-        .doc(userId)
-        .get();
-    if (userDoc.exists) {
-      final userData = userDoc.data()!;
+  Future<Map<String, dynamic>> _getUserDetails(String userId) async {
+    try {
+      final userDoc =
+          await FirebaseFirestore.instance
+              .collection('users')
+              .doc(userId)
+              .get();
+      if (userDoc.exists) {
+        final userData = userDoc.data()!;
+        return {
+          'gender':
+              userData['gender']?.toString().toLowerCase() ?? 'not_specified',
+          'firstName': userData['firstName'] ?? '',
+          'lastName': userData['lastName'] ?? '',
+          'email': userData['email'] ?? '',
+        };
+      }
       return {
-        'gender': userData['gender']?.toString().toLowerCase() ?? 'not_specified',
-        'firstName': userData['firstName'] ?? '',
-        'lastName': userData['lastName'] ?? '',
-        'email': userData['email'] ?? '',
+        'gender': 'not_specified',
+        'firstName': 'Unknown',
+        'lastName': '',
+        'email': '',
+      };
+    } catch (e) {
+      debugPrint('Error getting user details: $e');
+      return {
+        'gender': 'not_specified',
+        'firstName': 'Unknown',
+        'lastName': '',
+        'email': '',
       };
     }
-    return {
-      'gender': 'not_specified',
-      'firstName': 'Unknown',
-      'lastName': '',
-      'email': '',
-    };
-  } catch (e) {
-    debugPrint('Error getting user details: $e');
-    return {
-      'gender': 'not_specified',
-      'firstName': 'Unknown',
-      'lastName': '',
-      'email': '',
-    };
   }
-}
 
-Future<bool> _hasUserJoinedAnyEvent() async {
-  final authState = context.read<AuthBloc>().state;
-  if (authState is! AuthAuthenticated) return false;
-  
-  final userId = authState.user.uid;
-  
-  // Check if user has already joined any event in this tournament
-  for (int i = 0; i < widget.tournament.events.length; i++) {
-    if (widget.tournament.events[i].participants.contains(userId)) {
-      return true;
+  Future<bool> _hasUserJoinedAnyEvent() async {
+    final authState = context.read<AuthBloc>().state;
+    if (authState is! AuthAuthenticated) return false;
+
+    final userId = authState.user.uid;
+
+    // Check if user has already joined any event in this tournament
+    for (int i = 0; i < widget.tournament.events.length; i++) {
+      if (widget.tournament.events[i].participants.contains(userId)) {
+        return true;
+      }
     }
-  }
-  
-  return false;
-}
 
-Future<bool> _canUserJoinEvent() async {
-  final authState = context.read<AuthBloc>().state;
-  if (authState is! AuthAuthenticated) return false;
-
-  final userId = authState.user.uid;
-  final selectedEvent = widget.tournament.events[_selectedEventIndex];
-  final eventGender = _extractGenderFromMatchType(selectedEvent.matchType);
-  final userDetails = await _getUserDetails(userId);
-  final userGender = userDetails['gender'] as String;
-
-  // Check if user has already joined any event in this tournament
-  final hasJoinedAnyEvent = await _hasUserJoinedAnyEvent();
-  if (hasJoinedAnyEvent) {
-    return false; // User can only join one event per tournament
-  }
-
-  // If it's an open tournament, anyone can join
-  if (eventGender == 'open') return true;
-
-  // For mixed doubles, we need both male and female participants
-  if (eventGender == 'mixed') {
-    // Mixed events are open to all, but team formation logic will handle gender pairing
-    return userGender == 'male' || userGender == 'female';
-  }
-
-  // If user gender is not specified, they can't join gender-specific events
-  if (userGender == 'not_specified' && eventGender != 'open') {
     return false;
   }
 
-  // Check if user's gender matches event requirement
-  return eventGender == userGender;
-}
+  Future<bool> _canUserJoinEvent() async {
+    final authState = context.read<AuthBloc>().state;
+    if (authState is! AuthAuthenticated) return false;
 
-
-
-Future<void> _joinTournament(BuildContext context) async {
-  if (_isLoading) return;
-  
-  final now = DateTime.now().toUtc();
-  if (now.isAfter(widget.tournament.registrationEnd)) {
-    toastification.show(
-      context: context,
-      type: ToastificationType.error,
-      title: const Text('Registration Closed'),
-      description: const Text('Registration for this tournament has ended.'),
-      autoCloseDuration: const Duration(seconds: 3),
-    );
-    return;
-  }
-
-  final authState = context.read<AuthBloc>().state;
-  if (authState is! AuthAuthenticated) {
-    toastification.show(
-      context: context,
-      type: ToastificationType.error,
-      title: const Text('Authentication Required'),
-      description: const Text('Please sign in to join the tournament.'),
-      autoCloseDuration: const Duration(seconds: 2),
-    );
-    return;
-  }
-
-  final userId = authState.user.uid;
-  if (widget.tournament.createdBy == userId) {
-    toastification.show(
-      context: context,
-      type: ToastificationType.error,
-      title: const Text('Creator Cannot Join'),
-      description: const Text(
-        'As the tournament creator, you cannot join as a participant.',
-      ),
-      autoCloseDuration: const Duration(seconds: 2),
-    );
-    return;
-  }
-
-  if (_hasJoined) {
-    toastification.show(
-      context: context,
-      type: ToastificationType.warning,
-      title: const Text('Already Joined'),
-      description: const Text('You have already joined this event!'),
-      autoCloseDuration: const Duration(seconds: 2),
-    );
-    return;
-  }
-
-  // Check if user has already joined any event in this tournament
-  final hasJoinedAnyEvent = await _hasUserJoinedAnyEvent();
-  if (hasJoinedAnyEvent) {
-    // Find which event they joined
-    String joinedEventName = '';
-    for (int i = 0; i < widget.tournament.events.length; i++) {
-      if (widget.tournament.events[i].participants.contains(userId)) {
-        joinedEventName = widget.tournament.events[i].name;
-        break;
-      }
-    }
-    
-    toastification.show(
-      context: context,
-      type: ToastificationType.error,
-      title: const Text('Already Registered'),
-      description: Text(
-        'You have already joined "$joinedEventName" in this tournament. Players can only participate in one event per tournament.',
-      ),
-      autoCloseDuration: const Duration(seconds: 4),
-    );
-    return;
-  }
-
-  // Enhanced gender validation
-  final canJoin = await _canUserJoinEvent();
-  if (!canJoin) {
+    final userId = authState.user.uid;
     final selectedEvent = widget.tournament.events[_selectedEventIndex];
     final eventGender = _extractGenderFromMatchType(selectedEvent.matchType);
     final userDetails = await _getUserDetails(userId);
-    
-    String genderMessage = '';
-    if (eventGender == 'male') {
-      genderMessage = 'This event is for male participants only.';
-    } else if (eventGender == 'female') {
-      genderMessage = 'This event is for female participants only.';
-    } else if (eventGender == 'mixed') {
-      if (userDetails['gender'] == 'not_specified') {
-        genderMessage = 'Please update your gender in profile settings to join mixed doubles events.';
-      } else {
-        genderMessage = 'Mixed doubles events require valid gender information.';
-      }
-    } else {
-      genderMessage = 'You cannot join this event due to eligibility requirements.';
+    final userGender = userDetails['gender'] as String;
+
+    // Check if user has already joined any event in this tournament
+    final hasJoinedAnyEvent = await _hasUserJoinedAnyEvent();
+    if (hasJoinedAnyEvent) {
+      return false; // User can only join one event per tournament
     }
 
-    toastification.show(
-      context: context,
-      type: ToastificationType.error,
-      title: const Text('Cannot Join Event'),
-      description: Text(genderMessage),
-      autoCloseDuration: const Duration(seconds: 3),
-    );
-    return;
+    // If it's an open tournament, anyone can join
+    if (eventGender == 'open') return true;
+
+    // For mixed doubles, we need both male and female participants
+    if (eventGender == 'mixed') {
+      // Mixed events are open to all, but team formation logic will handle gender pairing
+      return userGender == 'male' || userGender == 'female';
+    }
+
+    // If user gender is not specified, they can't join gender-specific events
+    if (userGender == 'not_specified' && eventGender != 'open') {
+      return false;
+    }
+
+    // Check if user's gender matches event requirement
+    return eventGender == userGender;
   }
 
-  setState(() {
-    _isLoading = true;
-  });
+  Future<void> _joinTournament(BuildContext context) async {
+    if (_isLoading) return;
 
-  try {
-    final selectedEvent = widget.tournament.events[_selectedEventIndex];
-    if (selectedEvent.participants.length >= selectedEvent.maxParticipants) {
-      throw 'This event has reached its maximum participants.';
-    }
-
-    final updatedEvents = widget.tournament.events.asMap().entries.map((entry) {
-      if (entry.key == _selectedEventIndex) {
-        return Event(
-          name: entry.value.name,
-          format: entry.value.format,
-          level: entry.value.level,
-          maxParticipants: entry.value.maxParticipants,
-          bornAfter: entry.value.bornAfter,
-          matchType: entry.value.matchType,
-          matches: entry.value.matches,
-          participants: [...entry.value.participants, userId],
-          numberOfCourts: entry.value.numberOfCourts,
-          timeSlots: entry.value.timeSlots,
-        );
-      }
-      return entry.value;
-    }).toList();
-
-    await FirebaseFirestore.instance
-        .collection('tournaments')
-        .doc(widget.tournament.id)
-        .update({
-      'events': updatedEvents.map((e) => e.toFirestore()).toList(),
-    });
-
-    if (mounted) {
-      setState(() {
-        _participants.add({'id': userId, 'name': null});
-        _hasJoined = true;
-      });
-      await _loadParticipants();
-      
-      // Enhanced success message for different event types
-      final selectedEvent = widget.tournament.events[_selectedEventIndex];
-      final eventType = selectedEvent.matchType.toLowerCase().contains('doubles') ? 'doubles event' : 'singles event';
-      
-      toastification.show(
-        context: context,
-        type: ToastificationType.success,
-        title: const Text('Successfully Joined!'),
-        description: Text(
-          'You have joined ${selectedEvent.name} ($eventType). ${selectedEvent.matchType.toLowerCase().contains('mixed') ? 'Teams will be formed with proper gender pairing.' : ''}',
-        ),
-        autoCloseDuration: const Duration(seconds: 3),
-      );
-    }
-    
-  } catch (e) {
-    if (mounted) {
+    final now = DateTime.now().toUtc();
+    if (now.isAfter(widget.tournament.registrationEnd)) {
       toastification.show(
         context: context,
         type: ToastificationType.error,
-        title: const Text('Join Failed'),
-        description: Text('Failed to join event: $e'),
+        title: const Text('Registration Closed'),
+        description: const Text('Registration for this tournament has ended.'),
+        autoCloseDuration: const Duration(seconds: 3),
+      );
+      return;
+    }
+
+    final authState = context.read<AuthBloc>().state;
+    if (authState is! AuthAuthenticated) {
+      toastification.show(
+        context: context,
+        type: ToastificationType.error,
+        title: const Text('Authentication Required'),
+        description: const Text('Please sign in to join the tournament.'),
         autoCloseDuration: const Duration(seconds: 2),
       );
+      return;
     }
-  } finally {
-    if (mounted) {
-      setState(() {
-        _isLoading = false;
-      });
+
+    final userId = authState.user.uid;
+    if (widget.tournament.createdBy == userId) {
+      toastification.show(
+        context: context,
+        type: ToastificationType.error,
+        title: const Text('Creator Cannot Join'),
+        description: const Text(
+          'As the tournament creator, you cannot join as a participant.',
+        ),
+        autoCloseDuration: const Duration(seconds: 2),
+      );
+      return;
+    }
+
+    if (_hasJoined) {
+      toastification.show(
+        context: context,
+        type: ToastificationType.warning,
+        title: const Text('Already Joined'),
+        description: const Text('You have already joined this event!'),
+        autoCloseDuration: const Duration(seconds: 2),
+      );
+      return;
+    }
+
+    // Check if user has already joined any event in this tournament
+    final hasJoinedAnyEvent = await _hasUserJoinedAnyEvent();
+    if (hasJoinedAnyEvent) {
+      // Find which event they joined
+      String joinedEventName = '';
+      for (int i = 0; i < widget.tournament.events.length; i++) {
+        if (widget.tournament.events[i].participants.contains(userId)) {
+          joinedEventName = widget.tournament.events[i].name;
+          break;
+        }
+      }
+
+      toastification.show(
+        context: context,
+        type: ToastificationType.error,
+        title: const Text('Already Registered'),
+        description: Text(
+          'You have already joined "$joinedEventName" in this tournament. Players can only participate in one event per tournament.',
+        ),
+        autoCloseDuration: const Duration(seconds: 4),
+      );
+      return;
+    }
+
+    // Enhanced gender validation
+    final canJoin = await _canUserJoinEvent();
+    if (!canJoin) {
+      final selectedEvent = widget.tournament.events[_selectedEventIndex];
+      final eventGender = _extractGenderFromMatchType(selectedEvent.matchType);
+      final userDetails = await _getUserDetails(userId);
+
+      String genderMessage = '';
+      if (eventGender == 'male') {
+        genderMessage = 'This event is for male participants only.';
+      } else if (eventGender == 'female') {
+        genderMessage = 'This event is for female participants only.';
+      } else if (eventGender == 'mixed') {
+        if (userDetails['gender'] == 'not_specified') {
+          genderMessage =
+              'Please update your gender in profile settings to join mixed doubles events.';
+        } else {
+          genderMessage =
+              'Mixed doubles events require valid gender information.';
+        }
+      } else {
+        genderMessage =
+            'You cannot join this event due to eligibility requirements.';
+      }
+
+      toastification.show(
+        context: context,
+        type: ToastificationType.error,
+        title: const Text('Cannot Join Event'),
+        description: Text(genderMessage),
+        autoCloseDuration: const Duration(seconds: 3),
+      );
+      return;
+    }
+
+    setState(() {
+      _isLoading = true;
+    });
+
+    try {
+      final selectedEvent = widget.tournament.events[_selectedEventIndex];
+      if (selectedEvent.participants.length >= selectedEvent.maxParticipants) {
+        throw 'This event has reached its maximum participants.';
+      }
+
+      final updatedEvents =
+          widget.tournament.events.asMap().entries.map((entry) {
+            if (entry.key == _selectedEventIndex) {
+              return Event(
+                name: entry.value.name,
+                format: entry.value.format,
+                level: entry.value.level,
+                maxParticipants: entry.value.maxParticipants,
+                bornAfter: entry.value.bornAfter,
+                matchType: entry.value.matchType,
+                matches: entry.value.matches,
+                participants: [...entry.value.participants, userId],
+                numberOfCourts: entry.value.numberOfCourts,
+                timeSlots: entry.value.timeSlots,
+              );
+            }
+            return entry.value;
+          }).toList();
+
+      await FirebaseFirestore.instance
+          .collection('tournaments')
+          .doc(widget.tournament.id)
+          .update({
+            'events': updatedEvents.map((e) => e.toFirestore()).toList(),
+          });
+
+      if (mounted) {
+        setState(() {
+          _participants.add({'id': userId, 'name': null});
+          _hasJoined = true;
+        });
+        await _loadParticipants();
+
+        // Enhanced success message for different event types
+        final selectedEvent = widget.tournament.events[_selectedEventIndex];
+        final eventType =
+            selectedEvent.matchType.toLowerCase().contains('doubles')
+                ? 'doubles event'
+                : 'singles event';
+
+        toastification.show(
+          context: context,
+          type: ToastificationType.success,
+          title: const Text('Successfully Joined!'),
+          description: Text(
+            'You have joined ${selectedEvent.name} ($eventType). ${selectedEvent.matchType.toLowerCase().contains('mixed') ? 'Teams will be formed with proper gender pairing.' : ''}',
+          ),
+          autoCloseDuration: const Duration(seconds: 3),
+        );
+      }
+    } catch (e) {
+      if (mounted) {
+        toastification.show(
+          context: context,
+          type: ToastificationType.error,
+          title: const Text('Join Failed'),
+          description: Text('Failed to join event: $e'),
+          autoCloseDuration: const Duration(seconds: 2),
+        );
+      }
+    } finally {
+      if (mounted) {
+        setState(() {
+          _isLoading = false;
+        });
+      }
     }
   }
-}
 
-// Helper functions for match generation
 Future<void> _generateKnockoutMatches(
   List<Map<String, dynamic>> competitors,
   bool isDoubles,
   Event selectedEvent,
   List<Map<String, dynamic>> newMatches,
-  int currentDay,
   int currentTimeSlotIndex,
   int currentCourt,
-  int totalDays,
 ) async {
   List<Map<String, dynamic>> currentRoundParticipants = List.from(competitors);
   int round = 1;
 
   while (currentRoundParticipants.length > 1) {
     final nextRoundParticipants = <Map<String, dynamic>>[];
+    final roundMatches = <Map<String, dynamic>>[];
 
     for (int i = 0; i < currentRoundParticipants.length - 1; i += 2) {
       final competitor1 = currentRoundParticipants[i];
@@ -2480,28 +3038,24 @@ Future<void> _generateKnockoutMatches(
         selectedEvent,
         round,
         i ~/ 2 + 1,
-        currentDay,
         currentTimeSlotIndex,
         currentCourt,
         isDoubles,
       );
 
-      newMatches.add(matchData);
+      roundMatches.add(matchData);
+      
+      // Create a TBD placeholder for the next round
       nextRoundParticipants.add({
-        'id': 'TBD',
+        'id': 'TBD', // This will be updated when the match is completed
         'winnerMatchId': matchData['matchId'],
+        'position': i ~/ 2, // Track position in the bracket
       });
 
       // Update scheduling positions
-      final scheduleUpdate = _updateSchedulePosition(
-        currentCourt,
-        currentTimeSlotIndex,
-        currentDay,
-        totalDays,
-      );
+      final scheduleUpdate = _updateSchedulePosition(currentCourt, currentTimeSlotIndex);
       currentCourt = scheduleUpdate['court']!;
       currentTimeSlotIndex = scheduleUpdate['timeSlotIndex']!;
-      currentDay = scheduleUpdate['day']!;
     }
 
     // Handle bye if odd number of participants
@@ -2511,193 +3065,240 @@ Future<void> _generateKnockoutMatches(
         byeCompetitor,
         selectedEvent,
         round,
-        currentDay,
         currentTimeSlotIndex,
         currentCourt,
         isDoubles,
       );
-      
-      newMatches.add(byeMatchData);
+
+      roundMatches.add(byeMatchData);
       nextRoundParticipants.add({
         'id': isDoubles ? byeCompetitor['teamId'] : byeCompetitor['id'],
         'winnerMatchId': byeMatchData['matchId'],
+        'position': currentRoundParticipants.length ~/ 2,
       });
     }
 
-    currentRoundParticipants = nextRoundParticipants;
-    round++;
-  }
-}
-
-Future<void> _generateRoundRobinMatches(
-  List<Map<String, dynamic>> competitors,
-  bool isDoubles,
-  Event selectedEvent,
-  List<Map<String, dynamic>> newMatches,
-  int currentDay,
-  int currentTimeSlotIndex,
-  int currentCourt,
-  int totalDays,
-) async {
-  final n = competitors.length;
-  final rounds = n.isEven ? n - 1 : n;
-  
-  List<Map<String, dynamic>> fixed = List.from(competitors);
-  if (n.isOdd) {
-    fixed.add({'id': 'bye', 'name': 'Bye'});
-  }
-
-  for (int round = 1; round <= rounds; round++) {
-    for (int i = 0; i < fixed.length ~/ 2; i++) {
-      final competitor1 = fixed[i];
-      final competitor2 = fixed[fixed.length - 1 - i];
-
-      // Skip if one of them is a bye
-      if (competitor1['id'] == 'bye' || competitor2['id'] == 'bye') {
-        continue;
-      }
-
-      final matchData = await _createMatchData(
-        competitor1,
-        competitor2,
-        selectedEvent,
-        round,
-        i + 1,
-        currentDay,
-        currentTimeSlotIndex,
-        currentCourt,
-        isDoubles,
-      );
-
-      newMatches.add(matchData);
-
-      // Update scheduling positions
-      final scheduleUpdate = _updateSchedulePosition(
-        currentCourt,
-        currentTimeSlotIndex,
-        currentDay,
-        totalDays,
-      );
-      currentCourt = scheduleUpdate['court']!;
-      currentTimeSlotIndex = scheduleUpdate['timeSlotIndex']!;
-      currentDay = scheduleUpdate['day']!;
-    }
-
-    // Rotate for next round (keep first element fixed)
-    final last = fixed.removeLast();
-    fixed.insert(1, last);
-  }
-}
-
-Map<String, int> _updateSchedulePosition(
-  int currentCourt,
-  int currentTimeSlotIndex,
-  int currentDay,
-  int totalDays,
-) {
-  currentCourt++;
-  if (currentCourt > _numberOfCourts) {
-    currentCourt = 1;
-    currentTimeSlotIndex++;
-    if (currentTimeSlotIndex >= _timeSlots.length) {
-      currentTimeSlotIndex = 0;
-      currentDay++;
-      if (currentDay >= totalDays) {
-        throw 'Not enough days in tournament to schedule all matches';
-      }
+    // Add all matches for this round
+    newMatches.addAll(roundMatches);
+    
+    // Setup next round with TBD placeholders
+    if (nextRoundParticipants.length > 1) {
+      currentRoundParticipants = nextRoundParticipants;
+      round++;
+    } else if (nextRoundParticipants.length == 1) {
+      // This is the final - no need to create another round
+      break;
     }
   }
-  
-  return {
-    'court': currentCourt,
-    'timeSlotIndex': currentTimeSlotIndex,
-    'day': currentDay,
-  };
 }
 
-Future<Map<String, dynamic>> _createMatchData(
+
+
+
+  
+  Future<void> _generateRoundRobinMatches(
+    List<Map<String, dynamic>> competitors,
+    bool isDoubles,
+    Event selectedEvent,
+    List<Map<String, dynamic>> newMatches,
+    int currentTimeSlotIndex,
+    int currentCourt,
+  ) async {
+    final n = competitors.length;
+    final rounds = n.isEven ? n - 1 : n;
+
+    List<Map<String, dynamic>> fixed = List.from(competitors);
+    if (n.isOdd) {
+      fixed.add({'id': 'bye', 'name': 'Bye'});
+    }
+
+    for (int round = 1; round <= rounds; round++) {
+      for (int i = 0; i < fixed.length ~/ 2; i++) {
+        final competitor1 = fixed[i];
+        final competitor2 = fixed[fixed.length - 1 - i];
+
+        // Skip if one of them is a bye
+        if (competitor1['id'] == 'bye' || competitor2['id'] == 'bye') {
+          continue;
+        }
+
+        final matchData = await _createMatchData(
+          competitor1,
+          competitor2,
+          selectedEvent,
+          round,
+          i + 1,
+          currentTimeSlotIndex,
+          currentCourt,
+          isDoubles,
+        );
+
+        newMatches.add(matchData);
+
+        // Update scheduling positions - MODIFIED: Remove day tracking
+        final scheduleUpdate = _updateSchedulePosition(
+          currentCourt,
+          currentTimeSlotIndex,
+        );
+        currentCourt = scheduleUpdate['court']!;
+        currentTimeSlotIndex = scheduleUpdate['timeSlotIndex']!;
+      }
+
+      // Rotate for next round (keep first element fixed)
+      final last = fixed.removeLast();
+      fixed.insert(1, last);
+    }
+  }
+
+  Map<String, int> _updateSchedulePosition(
+    int currentCourt,
+    int currentTimeSlotIndex,
+  ) {
+    currentCourt++;
+    if (currentCourt > _numberOfCourts) {
+      currentCourt = 1;
+      currentTimeSlotIndex++;
+      if (currentTimeSlotIndex >= _timeSlots.length) {
+        // Reset to first time slot if we run out
+        currentTimeSlotIndex = 0;
+      }
+    }
+
+    return {'court': currentCourt, 'timeSlotIndex': currentTimeSlotIndex};
+  }
+
+
+  Future<Map<String, dynamic>> _createMatchData(
   Map<String, dynamic> competitor1,
   Map<String, dynamic> competitor2,
   Event selectedEvent,
   int round,
   int matchNumber,
-  int currentDay,
   int currentTimeSlotIndex,
   int currentCourt,
   bool isDoubles,
 ) async {
-  final matchDate = widget.tournament.startDate.add(Duration(days: currentDay));
   final timeSlot = _timeSlots[currentTimeSlotIndex];
   final matchId = '${selectedEvent.name}_round${round}_match$matchNumber';
 
-  if (isDoubles) {
-    return {
-      'matchId': matchId,
-      'eventId': selectedEvent.name,
-      'matchType': selectedEvent.matchType,
-      'round': round,
-      'team1': competitor1['playerNames'] ?? ['Unknown', 'Unknown'],
-      'team2': competitor2['playerNames'] ?? ['Unknown', 'Unknown'],
-      'team1Ids': competitor1['playerIds'] ?? ['unknown1', 'unknown2'],
-      'team2Ids': competitor2['playerIds'] ?? ['unknown1', 'unknown2'],
-      'team1Genders': competitor1['playerGenders'] ?? ['unknown', 'unknown'],
-      'team2Genders': competitor2['playerGenders'] ?? ['unknown', 'unknown'],
-      'teamType1': competitor1['teamType'] ?? 'unknown',
-      'teamType2': competitor2['teamType'] ?? 'unknown',
-      'completed': false,
-      'winner': null,
-      'umpire': {'name': '', 'email': '', 'phone': ''},
-      'liveScores': {
-        'team1': [0, 0, 0],
-        'team2': [0, 0, 0],
-        'currentGame': 1,
-        'isLive': false,
-        'currentServer': 'team1',
-      },
-      'startTime': Timestamp.fromDate(matchDate),
-      'court': currentCourt,
-      'timeSlot': timeSlot,
-      'lastUpdated': FieldValue.serverTimestamp(),
-    };
-  } else {
-    return {
-      'matchId': matchId,
-      'eventId': selectedEvent.name,
-      'matchType': selectedEvent.matchType,
-      'round': round,
-      'player1': competitor1['name'] ?? await _getDisplayName(competitor1['id']),
-      'player2': competitor2['name'] ?? await _getDisplayName(competitor2['id']),
-      'player1Id': competitor1['id'],
-      'player2Id': competitor2['id'],
-      'completed': false,
-      'winner': null,
-      'umpire': {'name': '', 'email': '', 'phone': ''},
-      'liveScores': {
-        'player1': [0, 0, 0],
-        'player2': [0, 0, 0],
-        'currentGame': 1,
-        'isLive': false,
-        'currentServer': 'player1',
-      },
-      'startTime': Timestamp.fromDate(matchDate),
-      'court': currentCourt,
-      'timeSlot': timeSlot,
-      'lastUpdated': FieldValue.serverTimestamp(),
-    };
+  // Check if we're dealing with TBD placeholders from previous rounds
+  final isCompetitor1TBD = competitor1['id'] == 'TBD';
+  final isCompetitor2TBD = competitor2['id'] == 'TBD';
+
+  // Parse the time slot to create a proper DateTime
+  DateTime? startTime;
+  try {
+    // Get tournament start date and timezone
+    final tournamentDoc = await FirebaseFirestore.instance
+        .collection('tournaments')
+        .doc(widget.tournament.id)
+        .get();
+
+    final data = tournamentDoc.data();
+    final tournamentStartDate = (data?['startDate'] as Timestamp?)?.toDate() ?? DateTime.now();
+
+    // Parse time slot (format: "HH:mm-HH:mm")
+    final timeParts = timeSlot.split('-');
+    if (timeParts.length == 2) {
+      final startTimeParts = timeParts[0].trim().split(':');
+      if (startTimeParts.length == 2) {
+        final hour = int.tryParse(startTimeParts[0]);
+        final minute = int.tryParse(startTimeParts[1]);
+
+        if (hour != null && minute != null) {
+          // Create start time using tournament start date with the time slot time
+          startTime = DateTime(
+            tournamentStartDate.year,
+            tournamentStartDate.month,
+            tournamentStartDate.day,
+            hour,
+            minute,
+          );
+        }
+      }
+    }
+  } catch (e) {
+    debugPrint('Error parsing time slot: $e');
   }
+
+  // In the _createMatchData method, add flags to track TBD origins
+if (isDoubles) {
+  return {
+    'matchId': matchId,
+    'eventId': selectedEvent.name,
+    'matchType': selectedEvent.matchType,
+    'round': round,
+    'team1': isCompetitor1TBD ? ['TBD', 'TBD'] : competitor1['playerNames'] ?? ['Unknown', 'Unknown'],
+    'team2': isCompetitor2TBD ? ['TBD', 'TBD'] : competitor2['playerNames'] ?? ['Unknown', 'Unknown'],
+    'team1Ids': isCompetitor1TBD ? ['TBD', 'TBD'] : competitor1['playerIds'] ?? ['unknown1', 'unknown2'],
+    'team2Ids': isCompetitor2TBD ? ['TBD', 'TBD'] : competitor2['playerIds'] ?? ['unknown1', 'unknown2'],
+    'team1Genders': isCompetitor1TBD ? ['unknown', 'unknown'] : competitor1['playerGenders'] ?? ['unknown', 'unknown'],
+    'team2Genders': isCompetitor2TBD ? ['unknown', 'unknown'] : competitor2['playerGenders'] ?? ['unknown', 'unknown'],
+    'teamType1': isCompetitor1TBD ? 'TBD' : competitor1['teamType'] ?? 'unknown',
+    'teamType2': isCompetitor2TBD ? 'TBD' : competitor2['teamType'] ?? 'unknown',
+    'completed': false,
+    'winner': null,
+    'umpire': {'name': '', 'email': '', 'phone': ''},
+    'liveScores': {
+      'team1': [0, 0, 0],
+      'team2': [0, 0, 0],
+      'currentGame': 1,
+      'isLive': false,
+      'currentServer': 'team1',
+    },
+    'court': currentCourt,
+    'timeSlot': timeSlot,
+    'startTime': startTime != null ? Timestamp.fromDate(startTime.toUtc()) : null,
+    'lastUpdated': FieldValue.serverTimestamp(),
+    // Store references to previous matches for winner propagation
+    'previousMatch1': competitor1['winnerMatchId'],
+    'previousMatch2': competitor2['winnerMatchId'],
+    // Track which slots were originally TBD
+    'wasTBDTeam1': isCompetitor1TBD,
+    'wasTBDTeam2': isCompetitor2TBD,
+  };
+} else {
+  return {
+    'matchId': matchId,
+    'eventId': selectedEvent.name,
+    'matchType': selectedEvent.matchType,
+    'round': round,
+    'player1': isCompetitor1TBD ? 'TBD' : competitor1['name'] ?? await _getDisplayName(competitor1['id']),
+    'player2': isCompetitor2TBD ? 'TBD' : competitor2['name'] ?? await _getDisplayName(competitor2['id']),
+    'player1Id': isCompetitor1TBD ? 'TBD' : competitor1['id'],
+    'player2Id': isCompetitor2TBD ? 'TBD' : competitor2['id'],
+    'completed': false,
+    'winner': null,
+    'umpire': {'name': '', 'email': '', 'phone': ''},
+    'liveScores': {
+      'player1': [0, 0, 0],
+      'player2': [0, 0, 0],
+      'currentGame': 1,
+      'isLive': false,
+      'currentServer': 'player1',
+    },
+    'court': currentCourt,
+    'timeSlot': timeSlot,
+    'startTime': startTime != null ? Timestamp.fromDate(startTime.toUtc()) : null,
+    'lastUpdated': FieldValue.serverTimestamp(),
+    // Store references to previous matches for winner propagation
+    'previousMatch1': competitor1['winnerMatchId'],
+    'previousMatch2': competitor2['winnerMatchId'],
+    // Track which slots were originally TBD
+    'wasTBD1': isCompetitor1TBD,
+    'wasTBD2': isCompetitor2TBD,
+  };
+}
 }
 
 Future<Map<String, dynamic>> _createByeMatch(
   Map<String, dynamic> byeCompetitor,
   Event selectedEvent,
   int round,
-  int currentDay,
   int currentTimeSlotIndex,
   int currentCourt,
   bool isDoubles,
 ) async {
-  final matchDate = widget.tournament.startDate.add(Duration(days: currentDay));
-  final timeSlot = _timeSlots[currentTimeSlotIndex];
   final byeMatchId = '${selectedEvent.name}_round${round}_bye';
 
   if (isDoubles) {
@@ -2720,9 +3321,7 @@ Future<Map<String, dynamic>> _createByeMatch(
         'isLive': false,
         'currentServer': 'team1',
       },
-      'startTime': Timestamp.fromDate(matchDate),
-      'court': currentCourt,
-      'timeSlot': timeSlot,
+      'isBye': true, // Add flag to identify bye matches
       'lastUpdated': FieldValue.serverTimestamp(),
     };
   } else {
@@ -2731,7 +3330,8 @@ Future<Map<String, dynamic>> _createByeMatch(
       'eventId': selectedEvent.name,
       'matchType': selectedEvent.matchType,
       'round': round,
-      'player1': byeCompetitor['name'] ?? await _getDisplayName(byeCompetitor['id']),
+      'player1':
+          byeCompetitor['name'] ?? await _getDisplayName(byeCompetitor['id']),
       'player2': 'Bye',
       'player1Id': byeCompetitor['id'],
       'player2Id': 'bye',
@@ -2745,174 +3345,173 @@ Future<Map<String, dynamic>> _createByeMatch(
         'isLive': false,
         'currentServer': 'player1',
       },
-      'startTime': Timestamp.fromDate(matchDate),
-      'court': currentCourt,
-      'timeSlot': timeSlot,
+      'isBye': true, // Add flag to identify bye matches
       'lastUpdated': FieldValue.serverTimestamp(),
     };
   }
 }
 
-Future<void> _saveMatchesToFirestore(
-  List<Map<String, dynamic>> matches,
-  Event selectedEvent,
-) async {
-  final batch = FirebaseFirestore.instance.batch();
-  final matchesRef = FirebaseFirestore.instance
-      .collection('tournaments')
-      .doc(widget.tournament.id)
-      .collection('matches');
+  Future<void> _saveMatchesToFirestore(
+    List<Map<String, dynamic>> matches,
+    Event selectedEvent,
+  ) async {
+    final batch = FirebaseFirestore.instance.batch();
+    final matchesRef = FirebaseFirestore.instance
+        .collection('tournaments')
+        .doc(widget.tournament.id)
+        .collection('matches');
 
-  for (var match in matches) {
-    batch.set(matchesRef.doc(match['matchId']), match);
+    for (var match in matches) {
+      batch.set(matchesRef.doc(match['matchId']), match);
+    }
+
+    await batch.commit();
+
+    // Update tournament with match references
+    final updatedEvents =
+        widget.tournament.events.asMap().entries.map((entry) {
+          if (entry.key == _selectedEventIndex) {
+            return Event(
+              name: entry.value.name,
+              format: entry.value.format,
+              level: entry.value.level,
+              maxParticipants: entry.value.maxParticipants,
+              bornAfter: entry.value.bornAfter,
+              matchType: entry.value.matchType,
+              matches: matches.map((m) => m['matchId'] as String).toList(),
+              participants: entry.value.participants,
+              numberOfCourts: _numberOfCourts,
+              timeSlots: List<String>.from(_timeSlots),
+            );
+          }
+          return entry.value;
+        }).toList();
+
+    await FirebaseFirestore.instance
+        .collection('tournaments')
+        .doc(widget.tournament.id)
+        .update({
+          'events': updatedEvents.map((e) => e.toFirestore()).toList(),
+          'lastUpdated': FieldValue.serverTimestamp(),
+        });
   }
 
-  await batch.commit();
+  Future<List<Map<String, dynamic>>> _createDoublesTeams(
+    List<Map<String, dynamic>> participants,
+    String matchType,
+  ) async {
+    final teams = <Map<String, dynamic>>[];
+    final isMixed = matchType.toLowerCase().contains('mixed');
 
-  // Update tournament with match references
-  final updatedEvents = widget.tournament.events.asMap().entries.map((entry) {
-    if (entry.key == _selectedEventIndex) {
-      return Event(
-        name: entry.value.name,
-        format: entry.value.format,
-        level: entry.value.level,
-        maxParticipants: entry.value.maxParticipants,
-        bornAfter: entry.value.bornAfter,
-        matchType: entry.value.matchType,
-        matches: matches.map((m) => m['matchId'] as String).toList(),
-        participants: entry.value.participants,
-        numberOfCourts: _numberOfCourts,
-        timeSlots: List<String>.from(_timeSlots),
-      );
-    }
-    return entry.value;
-  }).toList();
+    if (isMixed) {
+      // For mixed doubles: pair 1 male + 1 female
+      final males = <Map<String, dynamic>>[];
+      final females = <Map<String, dynamic>>[];
 
-  await FirebaseFirestore.instance
-      .collection('tournaments')
-      .doc(widget.tournament.id)
-      .update({
-    'events': updatedEvents.map((e) => e.toFirestore()).toList(),
-    'lastUpdated': FieldValue.serverTimestamp(),
-  });
-}
+      // Separate participants by gender
+      for (var participant in participants) {
+        final userDetails = await _getUserDetails(participant['id']);
+        final gender = userDetails['gender'] as String;
 
+        if (gender == 'male') {
+          males.add({
+            ...participant,
+            'gender': gender,
+            'firstName': userDetails['firstName'],
+            'lastName': userDetails['lastName'],
+          });
+        } else if (gender == 'female') {
+          females.add({
+            ...participant,
+            'gender': gender,
+            'firstName': userDetails['firstName'],
+            'lastName': userDetails['lastName'],
+          });
+        }
+      }
 
+      // Shuffle for random pairing
+      males.shuffle();
+      females.shuffle();
 
-Future<List<Map<String, dynamic>>> _createDoublesTeams(
-  List<Map<String, dynamic>> participants,
-  String matchType,
-) async {
-  final teams = <Map<String, dynamic>>[];
-  final isMixed = matchType.toLowerCase().contains('mixed');
-  
-  if (isMixed) {
-    // For mixed doubles: pair 1 male + 1 female
-    final males = <Map<String, dynamic>>[];
-    final females = <Map<String, dynamic>>[];
-    
-    // Separate participants by gender
-    for (var participant in participants) {
-      final userDetails = await _getUserDetails(participant['id']);
-      final gender = userDetails['gender'] as String;
-      
-      if (gender == 'male') {
-        males.add({
-          ...participant,
-          'gender': gender,
-          'firstName': userDetails['firstName'],
-          'lastName': userDetails['lastName'],
-        });
-      } else if (gender == 'female') {
-        females.add({
-          ...participant,
-          'gender': gender,
-          'firstName': userDetails['firstName'],
-          'lastName': userDetails['lastName'],
+      // Create mixed teams (1 male + 1 female)
+      final maxTeams = math.min(males.length, females.length);
+
+      for (int i = 0; i < maxTeams; i++) {
+        final male = males[i];
+        final female = females[i];
+
+        teams.add({
+          'teamId': 'mixed_team_${teams.length + 1}',
+          'playerIds': [male['id'], female['id']],
+          'playerNames': [
+            '${male['firstName']} ${male['lastName']}'.trim(),
+            '${female['firstName']} ${female['lastName']}'.trim(),
+          ],
+          'playerGenders': ['male', 'female'],
+          'teamType': 'mixed',
         });
       }
-    }
-    
-    // Shuffle for random pairing
-    males.shuffle();
-    females.shuffle();
-    
-    // Create mixed teams (1 male + 1 female)
-    final maxTeams = math.min(males.length, females.length);
-    
-    for (int i = 0; i < maxTeams; i++) {
-      final male = males[i];
-      final female = females[i];
-      
-      teams.add({
-        'teamId': 'mixed_team_${teams.length + 1}',
-        'playerIds': [male['id'], female['id']],
-        'playerNames': [
-          '${male['firstName']} ${male['lastName']}'.trim(),
-          '${female['firstName']} ${female['lastName']}'.trim(),
-        ],
-        'playerGenders': ['male', 'female'],
-        'teamType': 'mixed',
-      });
-    }
-    
-    // Handle remaining participants (if uneven gender distribution)
-    final remainingParticipants = <Map<String, dynamic>>[];
-    if (males.length > maxTeams) {
-      remainingParticipants.addAll(males.sublist(maxTeams));
-    }
-    if (females.length > maxTeams) {
-      remainingParticipants.addAll(females.sublist(maxTeams));
-    }
-    
-    // For remaining participants, create same-gender teams if allowed
-    if (remainingParticipants.length >= 2) {
-      for (int i = 0; i < remainingParticipants.length - 1; i += 2) {
-        final player1 = remainingParticipants[i];
-        final player2 = remainingParticipants[i + 1];
-        
+
+      // Handle remaining participants (if uneven gender distribution)
+      final remainingParticipants = <Map<String, dynamic>>[];
+      if (males.length > maxTeams) {
+        remainingParticipants.addAll(males.sublist(maxTeams));
+      }
+      if (females.length > maxTeams) {
+        remainingParticipants.addAll(females.sublist(maxTeams));
+      }
+
+      // For remaining participants, create same-gender teams if allowed
+      if (remainingParticipants.length >= 2) {
+        for (int i = 0; i < remainingParticipants.length - 1; i += 2) {
+          final player1 = remainingParticipants[i];
+          final player2 = remainingParticipants[i + 1];
+
+          teams.add({
+            'teamId': 'backup_team_${teams.length + 1}',
+            'playerIds': [player1['id'], player2['id']],
+            'playerNames': [
+              '${player1['firstName']} ${player1['lastName']}'.trim(),
+              '${player2['firstName']} ${player2['lastName']}'.trim(),
+            ],
+            'playerGenders': [player1['gender'], player2['gender']],
+            'teamType': 'backup',
+          });
+        }
+      }
+    } else {
+      // For same-gender doubles: pair any two participants
+      final shuffledParticipants = List<Map<String, dynamic>>.from(
+        participants,
+      );
+      shuffledParticipants.shuffle();
+
+      for (int i = 0; i < shuffledParticipants.length - 1; i += 2) {
+        final player1 = shuffledParticipants[i];
+        final player2 = shuffledParticipants[i + 1];
+
+        // Get user details for proper names
+        final player1Details = await _getUserDetails(player1['id']);
+        final player2Details = await _getUserDetails(player2['id']);
+
         teams.add({
-          'teamId': 'backup_team_${teams.length + 1}',
+          'teamId': 'team_${teams.length + 1}',
           'playerIds': [player1['id'], player2['id']],
           'playerNames': [
-            '${player1['firstName']} ${player1['lastName']}'.trim(),
-            '${player2['firstName']} ${player2['lastName']}'.trim(),
+            '${player1Details['firstName']} ${player1Details['lastName']}'
+                .trim(),
+            '${player2Details['firstName']} ${player2Details['lastName']}'
+                .trim(),
           ],
-          'playerGenders': [player1['gender'], player2['gender']],
-          'teamType': 'backup',
+          'playerGenders': [player1Details['gender'], player2Details['gender']],
+          'teamType': 'same_gender',
         });
       }
     }
-    
-  } else {
-    // For same-gender doubles: pair any two participants
-    final shuffledParticipants = List<Map<String, dynamic>>.from(participants);
-    shuffledParticipants.shuffle();
-    
-    for (int i = 0; i < shuffledParticipants.length - 1; i += 2) {
-      final player1 = shuffledParticipants[i];
-      final player2 = shuffledParticipants[i + 1];
-      
-      // Get user details for proper names
-      final player1Details = await _getUserDetails(player1['id']);
-      final player2Details = await _getUserDetails(player2['id']);
-      
-      teams.add({
-        'teamId': 'team_${teams.length + 1}',
-        'playerIds': [player1['id'], player2['id']],
-        'playerNames': [
-          '${player1Details['firstName']} ${player1Details['lastName']}'.trim(),
-          '${player2Details['firstName']} ${player2Details['lastName']}'.trim(),
-        ],
-        'playerGenders': [player1Details['gender'], player2Details['gender']],
-        'teamType': 'same_gender',
-      });
-    }
-  }
-  
-  return teams;
-}
 
+    return teams;
+  }
 
   Future<void> _withdrawFromTournament(BuildContext context) async {
     if (_isLoading) return;
@@ -3310,6 +3909,10 @@ Future<List<Map<String, dynamic>>> _createDoublesTeams(
   }
 
   Widget _buildDetailsTab() {
+    final timezoneAbbreviation = TimezoneUtils.getTimezoneAbbreviation(
+      widget.tournament.timezone,
+    );
+
     return SingleChildScrollView(
       padding: const EdgeInsets.symmetric(horizontal: 20.0, vertical: 24.0),
       child: Column(
@@ -3362,26 +3965,26 @@ Future<List<Map<String, dynamic>>> _createDoublesTeams(
                 ),
                 const SizedBox(height: 16),
 
- _buildDetailRow(
+                _buildDetailRow(
                   icon: Icons.how_to_reg_outlined,
                   label: 'Deadline to Register',
-                  value: '${DateFormat('MMM dd, yyyy, hh:mm a').format(widget.tournament.registrationEnd)} ' "${widget.tournament.timezone}"
-                     
+                  value:
+                      '${DateFormat('MMM dd, yyyy, hh:mm a').format(widget.tournament.registrationEnd)} ($timezoneAbbreviation)',
                 ),
                 const SizedBox(height: 16),
-
 
                 _buildDetailRow(
                   icon: Icons.access_time_outlined,
                   label: 'Duration',
                   value:
                       widget.tournament.startDate != widget.tournament.endDate
-                          ? '${DateFormat('MMM dd, yyyy').format(widget.tournament.startDate)} - ${DateFormat('MMM dd, yyyy').format(widget.tournament.endDate)} ' "${widget.tournament.timezone}"
+                          ? '${DateFormat('MMM dd, yyyy').format(widget.tournament.startDate)} - ${DateFormat('MMM dd, yyyy').format(widget.tournament.endDate)} ($timezoneAbbreviation)'
                           : DateFormat(
                             'MMM dd, yyyy',
                           ).format(widget.tournament.startDate),
                 ),
                 const SizedBox(height: 16),
+
                 // Status
                 _buildDetailRow(
                   icon: Icons.info_outline,
@@ -3751,16 +4354,17 @@ Future<List<Map<String, dynamic>>> _createDoublesTeams(
                       disabledReason:
                           canGenerateMatches ? null : _timeUntilCanGenerate,
                     ),
-                  if (isCreator && hasMatches)
-                    _buildIconButton(
-                      icon: Icons.restart_alt,
-                      label: 'Reset All',
-                      onPressed: canGenerateMatches ? _resetMatches : () {},
-                      color: canGenerateMatches ? _errorColor : Colors.grey,
-                      enabled: canGenerateMatches,
-                      disabledReason:
-                          canGenerateMatches ? null : _timeUntilCanGenerate,
-                    ),
+                 if (isCreator && hasMatches)
+  _buildIconButton(
+    icon: Icons.restart_alt,
+    label: 'Reset All',
+    onPressed: _hasStartedOrCompletedMatches ? () {} : () { _resetMatches(); },
+    color: _hasStartedOrCompletedMatches ? Colors.grey : _errorColor,
+    enabled: !_hasStartedOrCompletedMatches && canGenerateMatches,
+    disabledReason: _hasStartedOrCompletedMatches 
+        ? 'Cannot reset - matches are in progress or completed'
+        : _timeUntilCanGenerate,
+  ),
                 ],
               ),
 
@@ -3937,102 +4541,107 @@ Future<List<Map<String, dynamic>>> _createDoublesTeams(
     );
   }
 
-  Widget _buildCurrentRoundMatches(
-    int round,
-    List<Map<String, dynamic>> roundMatches,
-    Event selectedEvent,
-    bool isCreator,
-  ) {
-    final isDoubles = selectedEvent.matchType.toLowerCase().contains('doubles');
 
-    return Column(
-      crossAxisAlignment: CrossAxisAlignment.start,
-      children: [
-        // Round header
-        Container(
-          padding: const EdgeInsets.all(16),
-          decoration: BoxDecoration(
-            gradient: LinearGradient(
-              colors: [
-                _accentColor.withOpacity(0.1),
-                _accentColor.withOpacity(0.05),
-              ],
-              begin: Alignment.centerLeft,
-              end: Alignment.centerRight,
-            ),
-          ),
-          child: Row(
-            children: [
-              Icon(Icons.emoji_events_outlined, color: _accentColor, size: 24),
-              const SizedBox(width: 12),
-              Text(
-                'Round $round',
-                style: GoogleFonts.poppins(
-                  fontSize: 20,
-                  fontWeight: FontWeight.w700,
-                  color: _accentColor,
-                  letterSpacing: 0.5,
-                ),
-              ),
-              const Spacer(),
-              Container(
-                padding: const EdgeInsets.symmetric(
-                  horizontal: 12,
-                  vertical: 6,
-                ),
-                decoration: BoxDecoration(
-                  color: _accentColor.withOpacity(0.2),
-                  borderRadius: BorderRadius.circular(16),
-                ),
-                child: Text(
-                  '${roundMatches.length} ${roundMatches.length == 1 ? 'Match' : 'Matches'}',
-                  style: GoogleFonts.poppins(
-                    fontSize: 12,
-                    fontWeight: FontWeight.w600,
-                    color: _accentColor,
-                  ),
-                ),
-              ),
+bool _hasTBDPlayers(Map<String, dynamic> match) {
+  final isDoubles = match['matchType'].toString().toLowerCase().contains('doubles');
+  if (isDoubles) {
+    final team1Ids = List<String>.from(match['team1Ids'] ?? []);
+    final team2Ids = List<String>.from(match['team2Ids'] ?? []);
+    return team1Ids.contains('TBD') || team2Ids.contains('TBD');
+  } else {
+    return match['player1Id'] == 'TBD' || match['player2Id'] == 'TBD';
+  }
+}
+
+bool _wasTBDButAssigned(Map<String, dynamic> match) {
+  return match['wasTBD1'] == true || 
+         match['wasTBD2'] == true || 
+         match['wasTBDTeam1'] == true || 
+         match['wasTBDTeam2'] == true;
+}
+
+
+
+Widget _buildCurrentRoundMatches(
+  int round,
+  List<Map<String, dynamic>> roundMatches,
+  Event selectedEvent,
+  bool isCreator,
+) {
+  final isDoubles = selectedEvent.matchType.toLowerCase().contains('doubles');
+
+  return Column(
+    crossAxisAlignment: CrossAxisAlignment.start,
+    children: [
+      // Round header
+      Container(
+        padding: const EdgeInsets.all(16),
+        decoration: BoxDecoration(
+          gradient: LinearGradient(
+            colors: [
+              _accentColor.withOpacity(0.1),
+              _accentColor.withOpacity(0.05),
             ],
+            begin: Alignment.centerLeft,
+            end: Alignment.centerRight,
           ),
         ),
-        Expanded(
-          child: ListView.builder(
-            padding: const EdgeInsets.all(16),
-            itemCount: roundMatches.length,
-            itemBuilder: (context, matchIndex) {
-              final match = roundMatches[matchIndex];
-              final startTime =
-                  (match['startTime'] as Timestamp?)?.toDate() ??
-                  DateTime.now();
-              final isCompleted = match['completed'] == true;
-              final winner = match['winner'] as String?;
-              final scores =
-                  match['liveScores'] ??
-                  {
-                    isDoubles ? 'team1' : 'player1': [0, 0, 0],
-                    isDoubles ? 'team2' : 'player2': [0, 0, 0],
-                  };
-
+        child: Row(
+          children: [
+            Icon(Icons.emoji_events_outlined, color: _accentColor, size: 24),
+            const SizedBox(width: 12),
+            Text(
+              'Round $round',
+              style: GoogleFonts.poppins(
+                fontSize: 20,
+                fontWeight: FontWeight.w700,
+                color: _accentColor,
+                letterSpacing: 0.5,
+              ),
+            ),
+            const Spacer(),
+            Container(
+              padding: const EdgeInsets.symmetric(
+                horizontal: 12,
+                vertical: 6,
+              ),
+              decoration: BoxDecoration(
+                color: _accentColor.withOpacity(0.2),
+                borderRadius: BorderRadius.circular(16),
+              ),
+              child: Text(
+                '${roundMatches.length} ${roundMatches.length == 1 ? 'Match' : 'Matches'}',
+                style: GoogleFonts.poppins(
+                  fontSize: 12,
+                  fontWeight: FontWeight.w600,
+                  color: _accentColor,
+                ),
+              ),
+            ),
+          ],
+        ),
+      ),
+      Expanded(
+        child: ListView.builder(
+          padding: const EdgeInsets.all(16),
+          itemCount: roundMatches.length,
+          itemBuilder: (context, matchIndex) {
+            final match = roundMatches[matchIndex];
+            final isBye = match['isBye'] == true;
+            final isCompleted = match['completed'] == true;
+            final winner = match['winner'] as String?;
+            
+            // Special styling for bye matches
+            if (isBye) {
               return Container(
                 margin: const EdgeInsets.only(bottom: 12),
                 decoration: BoxDecoration(
-                  color: Colors.white,
+                  color: Colors.grey.shade100,
                   borderRadius: BorderRadius.circular(12),
-                  boxShadow: [
-                    BoxShadow(
-                      color: Colors.black.withOpacity(0.05),
-                      blurRadius: 8,
-                      offset: const Offset(0, 2),
-                    ),
-                  ],
-                  border:
-                      isCompleted
-                          ? Border.all(
-                            color: _successColor.withOpacity(0.3),
-                            width: 1.5,
-                          )
-                          : null,
+                  border: Border.all(
+                    color: Colors.grey.shade300,
+                    width: 1,
+                  ),
                 ),
                 child: ListTile(
                   contentPadding: const EdgeInsets.symmetric(
@@ -4043,47 +4652,22 @@ Future<List<Map<String, dynamic>>> _createDoublesTeams(
                     width: 48,
                     height: 48,
                     decoration: BoxDecoration(
-                      gradient:
-                          isCompleted
-                              ? LinearGradient(
-                                colors: [
-                                  _successColor,
-                                  _successColor.withOpacity(0.7),
-                                ],
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                              )
-                              : LinearGradient(
-                                colors: [
-                                  _accentColor,
-                                  _accentColor.withOpacity(0.7),
-                                ],
-                                begin: Alignment.topLeft,
-                                end: Alignment.bottomRight,
-                              ),
+                      color: Colors.grey.shade300,
                       shape: BoxShape.circle,
-                      boxShadow: [
-                        BoxShadow(
-                          color: (isCompleted ? _successColor : _accentColor)
-                              .withOpacity(0.3),
-                          blurRadius: 4,
-                          offset: const Offset(0, 2),
-                        ),
-                      ],
                     ),
                     child: Icon(
-                      isCompleted ? Icons.check_circle : Icons.schedule,
-                      color: Colors.white,
+                      Icons.emoji_events_outlined,
+                      color: Colors.grey.shade600,
                       size: 24,
                     ),
                   ),
                   title: Text(
                     isDoubles
-                        ? '${(match['team1'] as List).join(' & ')} vs ${(match['team2'] as List).join(' & ')}'
-                        : '${match['player1']} vs ${match['player2']}',
+                        ? '${(match['team1'] as List).join(' & ')} receives a bye'
+                        : '${match['player1']} receives a bye',
                     style: GoogleFonts.poppins(
-                      fontWeight: FontWeight.w600,
-                      color: _textColor,
+                      fontWeight: FontWeight.w500,
+                      color: Colors.grey.shade700,
                       fontSize: 16,
                     ),
                   ),
@@ -4091,178 +4675,279 @@ Future<List<Map<String, dynamic>>> _createDoublesTeams(
                     crossAxisAlignment: CrossAxisAlignment.start,
                     children: [
                       const SizedBox(height: 6),
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.location_on_outlined,
-                            size: 16,
+                      Text(
+                        'Automatic advance to next round',
+                        style: GoogleFonts.poppins(
+                          color: Colors.grey.shade600,
+                          fontSize: 13,
+                        ),
+                      ),
+                    ],
+                  ),
+                  
+                ),
+              );
+            }
+            
+            // Regular match display
+            final startTime = (match['startTime'] as Timestamp?)?.toDate() ?? DateTime.now();
+            final scores = match['liveScores'] ?? {
+              isDoubles ? 'team1' : 'player1': [0, 0, 0],
+              isDoubles ? 'team2' : 'player2': [0, 0, 0],
+            };
+
+            return Container(
+              margin: const EdgeInsets.only(bottom: 12),
+              decoration: BoxDecoration(
+                color: Colors.white,
+                borderRadius: BorderRadius.circular(12),
+                boxShadow: [
+                  BoxShadow(
+                    color: Colors.black.withOpacity(0.05),
+                    blurRadius: 8,
+                    offset: const Offset(0, 2),
+                  ),
+                ],
+                border: isCompleted
+                    ? Border.all(
+                      color: _successColor.withOpacity(0.3),
+                      width: 1.5,
+                    )
+                    : null,
+              ),
+              child: ListTile(
+                contentPadding: const EdgeInsets.symmetric(
+                  horizontal: 16,
+                  vertical: 12,
+                ),
+                leading: Container(
+                  width: 48,
+                  height: 48,
+                  decoration: BoxDecoration(
+                    gradient:
+                        isCompleted
+                            ? LinearGradient(
+                              colors: [
+                                _successColor,
+                                _successColor.withOpacity(0.7),
+                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            )
+                            : LinearGradient(
+                              colors: [
+                                _accentColor,
+                                _accentColor.withOpacity(0.7),
+                              ],
+                              begin: Alignment.topLeft,
+                              end: Alignment.bottomRight,
+                            ),
+                    shape: BoxShape.circle,
+                    boxShadow: [
+                      BoxShadow(
+                        color: (isCompleted ? _successColor : _accentColor)
+                            .withOpacity(0.3),
+                        blurRadius: 4,
+                        offset: const Offset(0, 2),
+                      ),
+                    ],
+                  ),
+                  child: Icon(
+                    isCompleted ? Icons.check_circle : Icons.schedule,
+                    color: Colors.white,
+                    size: 24,
+                  ),
+                ),
+                title: Text(
+                  isDoubles
+                      ? '${(match['team1'] as List).join(' & ')} vs ${(match['team2'] as List).join(' & ')}'
+                      : '${match['player1']} vs ${match['player2']}',
+                  style: GoogleFonts.poppins(
+                    fontWeight: FontWeight.w600,
+                    color: _textColor,
+                    fontSize: 16,
+                  ),
+                ),
+                subtitle: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    const SizedBox(height: 6),
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.location_on_outlined,
+                          size: 16,
+                          color: _secondaryText,
+                        ),
+                        const SizedBox(width: 4),
+                        Text(
+                          'Court ${match['court']}',
+                          style: GoogleFonts.poppins(
                             color: _secondaryText,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
                           ),
-                          const SizedBox(width: 4),
-                          Text(
-                            'Court ${match['court']}',
+                        ),
+                        const SizedBox(width: 12),
+                        Icon(
+                          Icons.access_time,
+                          size: 16,
+                          color: _secondaryText,
+                        ),
+                        const SizedBox(width: 4),
+                        Expanded(
+                          child: Text(
+                            match['timeSlot'],
                             style: GoogleFonts.poppins(
                               color: _secondaryText,
                               fontSize: 13,
                               fontWeight: FontWeight.w500,
                             ),
-                          ),
-                          const SizedBox(width: 12),
-                          Icon(
-                            Icons.access_time,
-                            size: 16,
-                            color: _secondaryText,
-                          ),
-                          const SizedBox(width: 4),
-                          Expanded(
-                            child: Text(
-                              match['timeSlot'],
-                              style: GoogleFonts.poppins(
-                                color: _secondaryText,
-                                fontSize: 13,
-                                fontWeight: FontWeight.w500,
-                              ),
-                            ),
-                          ),
-                        ],
-                      ),
-                      const SizedBox(height: 4),
-                      Row(
-                        children: [
-                          Icon(
-                            Icons.calendar_today_outlined,
-                            size: 16,
-                            color: _secondaryText,
-                          ),
-                          const SizedBox(width: 4),
-                          Text(
-                            _formatDateTime(startTime),
-                            style: GoogleFonts.poppins(
-                              color: _secondaryText,
-                              fontSize: 13,
-                              fontWeight: FontWeight.w500,
-                            ),
-                          ),
-                        ],
-                      ),
-                      if (isCompleted) ...[
-                        const SizedBox(height: 8),
-                        Container(
-                          padding: const EdgeInsets.symmetric(
-                            horizontal: 8,
-                            vertical: 4,
-                          ),
-                          decoration: BoxDecoration(
-                            color: _successColor.withOpacity(0.1),
-                            borderRadius: BorderRadius.circular(6),
-                            border: Border.all(
-                              color: _successColor.withOpacity(0.3),
-                            ),
-                          ),
-                          child: Column(
-                            crossAxisAlignment: CrossAxisAlignment.start,
-                            children: [
-                              if (winner != null)
-                                Text.rich(
-                                  TextSpan(
-                                    text: 'Winner: ',
-                                    style: GoogleFonts.poppins(
-                                      color: _secondaryText,
-                                      fontSize: 12,
-                                    ),
-                                    children: [
-                                      TextSpan(
-                                        text:
-                                            winner == 'team1' ||
-                                                    winner == 'player1'
-                                                ? (isDoubles
-                                                    ? (match['team1'] as List)
-                                                        .join(' & ')
-                                                    : match['player1'])
-                                                : (isDoubles
-                                                    ? (match['team2'] as List)
-                                                        .join(' & ')
-                                                    : match['player2']),
-                                        style: GoogleFonts.poppins(
-                                          color: _successColor,
-                                          fontWeight: FontWeight.w600,
-                                          fontSize: 12,
-                                        ),
-                                      ),
-                                    ],
-                                  ),
-                                ),
-                              const SizedBox(height: 2),
-                              Text(
-                                'Score: ${(scores[isDoubles ? 'team1' : 'player1'] as List).join('-')} vs ${(scores[isDoubles ? 'team2' : 'player2'] as List).join('-')}',
-                                style: GoogleFonts.poppins(
-                                  color: _secondaryText,
-                                  fontSize: 12,
-                                  fontWeight: FontWeight.w500,
-                                ),
-                              ),
-                            ],
                           ),
                         ),
                       ],
-                    ],
-                  ),
-                  trailing:
-                      isCreator
-                          ? _buildIconOnlyButton(
-                            icon: Icons.delete_outline,
-                            onPressed: () {
-                              final matchIndex = _matches.indexWhere(
-                                (m) => m['matchId'] == match['matchId'],
-                              );
-                              if (matchIndex != -1) {
-                                _showDeleteConfirmation(context, matchIndex);
-                              }
-                            },
-                            color: _errorColor,
-                          )
-                          : Icon(
-                            Icons.arrow_forward_ios,
-                            size: 16,
-                            color: _secondaryText.withOpacity(0.5),
-                          ),
-                  onTap: () {
-                    final matchIndex = _matches.indexWhere(
-                      (m) => m['matchId'] == match['matchId'],
-                    );
-                    if (matchIndex != -1) {
-                      Navigator.push(
-                        context,
-                        MaterialPageRoute(
-                          builder:
-                              (_) => MatchDetailsPage(
-                                match: match,
-                                tournamentId: widget.tournament.id,
-                                isCreator: isCreator,
-                                isUmpire: _isUmpire,
-                                isDoubles: isDoubles,
-                                matchIndex: matchIndex,
-                                onDeleteMatch: () {
-                                  final idx = _matches.indexWhere(
-                                    (m) => m['matchId'] == match['matchId'],
-                                  );
-                                  if (idx != -1) {
-                                    _deleteMatch(idx);
-                                  }
-                                },
-                              ),
+                    ),
+                    const SizedBox(height: 4),
+                    Row(
+                      children: [
+                        Icon(
+                          Icons.calendar_today_outlined,
+                          size: 16,
+                          color: _secondaryText,
                         ),
-                      );
-                    }
-                  },
+                        const SizedBox(width: 4),
+                        Text(
+                          _formatDateTime(startTime),
+                          style: GoogleFonts.poppins(
+                            color: _secondaryText,
+                            fontSize: 13,
+                            fontWeight: FontWeight.w500,
+                          ),
+                        ),
+                      ],
+                    ),
+                    if (isCompleted) ...[
+                      const SizedBox(height: 8),
+                      Container(
+                        padding: const EdgeInsets.symmetric(
+                          horizontal: 8,
+                          vertical: 4,
+                        ),
+                        decoration: BoxDecoration(
+                          color: _successColor.withOpacity(0.1),
+                          borderRadius: BorderRadius.circular(6),
+                          border: Border.all(
+                            color: _successColor.withOpacity(0.3),
+                          ),
+                        ),
+                        child: Column(
+                          crossAxisAlignment: CrossAxisAlignment.start,
+                          children: [
+                            if (winner != null)
+                              Text.rich(
+                                TextSpan(
+                                  text: 'Winner: ',
+                                  style: GoogleFonts.poppins(
+                                    color: _secondaryText,
+                                    fontSize: 12,
+                                  ),
+                                  children: [
+                                    TextSpan(
+                                      text:
+                                          winner == 'team1' ||
+                                                  winner == 'player1'
+                                              ? (isDoubles
+                                                  ? (match['team1'] as List)
+                                                      .join(' & ')
+                                                  : match['player1'])
+                                              : (isDoubles
+                                                  ? (match['team2'] as List)
+                                                      .join(' & ')
+                                                  : match['player2']),
+                                      style: GoogleFonts.poppins(
+                                        color: _successColor,
+                                        fontWeight: FontWeight.w600,
+                                        fontSize: 12,
+                                      ),
+                                    ),
+                                  ],
+                                ),
+                              ),
+                            const SizedBox(height: 2),
+                            Text(
+                              'Score: ${(scores[isDoubles ? 'team1' : 'player1'] as List).join('-')} vs ${(scores[isDoubles ? 'team2' : 'player2'] as List).join('-')}',
+                              style: GoogleFonts.poppins(
+                                color: _secondaryText,
+                                fontSize: 12,
+                                fontWeight: FontWeight.w500,
+                              ),
+                            ),
+                          ],
+                        ),
+                      ),
+                    ],
+                  ],
                 ),
-              );
-            },
-          ),
+                trailing:
+                
+                    Row(
+                      mainAxisSize: MainAxisSize.min,
+                      children: [
+                    if ((isCreator || _isUmpire) && 
+        (_hasTBDPlayers(match) || _wasTBDButAssigned(match)))
+      _buildIconOnlyButton(
+        icon: Icons.edit,
+        onPressed: () => _showEditMatchDialog(match, matchIndex),
+        color: _accentColor,
+      ),
+    if (isCreator)
+      _buildIconOnlyButton(
+        icon: Icons.delete_outline,
+        onPressed: () {
+          _showDeleteConfirmation(context, matchIndex);
+        },
+        color: _errorColor,
+      ),
+                      ],
+                    ),
+                onTap: () {
+                  final matchIndex = _matches.indexWhere(
+                    (m) => m['matchId'] == match['matchId'],
+                  );
+                  if (matchIndex != -1) {
+                    Navigator.push(
+                      context,
+                      MaterialPageRoute(
+                        builder:
+                            (_) => MatchDetailsPage(
+                              match: match,
+                              tournamentId: widget.tournament.id,
+                              isCreator: isCreator,
+                              isUmpire: _isUmpire,
+                              isDoubles: isDoubles,
+                              matchIndex: matchIndex,
+                              onDeleteMatch: () {
+                                final idx = _matches.indexWhere(
+                                  (m) => m['matchId'] == match['matchId'],
+                                );
+                                if (idx != -1) {
+                                  _deleteMatch(idx);
+                                }
+                              },
+                            ),
+                      ),
+                    );
+                  }
+                },
+              ),
+            );
+          },
         ),
-      ],
-    );
-  }
+      ),
+    ],
+  );
+}
+
 
   Widget _buildLeaderboardTab() {
     final selectedEvent = widget.tournament.events[_selectedEventIndex];
@@ -4807,7 +5492,8 @@ Future<List<Map<String, dynamic>>> _createDoublesTeams(
                                                     child,
                                                     loadingProgress,
                                                   ) {
-                                                    if (loadingProgress == null) {
+                                                    if (loadingProgress ==
+                                                        null) {
                                                       return child;
                                                     }
                                                     return Center(
@@ -5180,14 +5866,13 @@ Widget _buildDetailRow({
   );
 }
 
-
-
 class _ManualMatchDialog extends StatefulWidget {
   final List<Map<String, dynamic>> competitors;
   final Event selectedEvent;
   final bool isDoubles;
   final bool isMixed;
-  final Function(dynamic, dynamic, DateTime, int, String) onCreateMatch;
+  final Function(dynamic, dynamic, int, String)
+  onCreateMatch; // MODIFIED: Remove DateTime parameter
   final Color primaryColor;
   final Color accentColor;
   final Color textColor;
@@ -5216,8 +5901,6 @@ class _ManualMatchDialog extends StatefulWidget {
 class _ManualMatchDialogState extends State<_ManualMatchDialog> {
   dynamic selectedCompetitor1;
   dynamic selectedCompetitor2;
-  DateTime selectedDate = DateTime.now();
-  TimeOfDay selectedTime = TimeOfDay.now();
   int selectedCourt = 1;
   String selectedTimeSlot = '';
   List<Map<String, dynamic>> availableTeams = [];
@@ -5226,11 +5909,11 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
   @override
   void initState() {
     super.initState();
-    selectedDate = DateTime.now();
-    selectedTimeSlot = widget.selectedEvent.timeSlots.isNotEmpty 
-        ? widget.selectedEvent.timeSlots[0] 
-        : 'TBD';
-    
+    selectedTimeSlot =
+        widget.selectedEvent.timeSlots.isNotEmpty
+            ? widget.selectedEvent.timeSlots[0]
+            : 'TBD';
+
     if (widget.isDoubles) {
       _generateTeamsForManualMatch();
     }
@@ -5244,23 +5927,26 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
     try {
       final teams = <Map<String, dynamic>>[];
       final competitors = widget.competitors;
-      
+
       if (widget.isMixed) {
         // For mixed doubles: create teams with gender validation
         final males = <Map<String, dynamic>>[];
         final females = <Map<String, dynamic>>[];
-        
+
         for (var participant in competitors) {
-          final userDetails = await FirebaseFirestore.instance
-              .collection('users')
-              .doc(participant['id'])
-              .get();
-          
+          final userDetails =
+              await FirebaseFirestore.instance
+                  .collection('users')
+                  .doc(participant['id'])
+                  .get();
+
           if (userDetails.exists) {
-            final gender = userDetails.data()?['gender']?.toString().toLowerCase() ?? 'not_specified';
+            final gender =
+                userDetails.data()?['gender']?.toString().toLowerCase() ??
+                'not_specified';
             final firstName = userDetails.data()?['firstName'] ?? '';
             final lastName = userDetails.data()?['lastName'] ?? '';
-            
+
             final playerData = {
               ...participant,
               'gender': gender,
@@ -5268,7 +5954,7 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
               'lastName': lastName,
               'fullName': '$firstName $lastName'.trim(),
             };
-            
+
             if (gender == 'male') {
               males.add(playerData);
             } else if (gender == 'female') {
@@ -5276,7 +5962,7 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
             }
           }
         }
-        
+
         // Create all possible mixed teams (1 male + 1 female)
         for (var male in males) {
           for (var female in females) {
@@ -5296,31 +5982,39 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
           for (int j = i + 1; j < competitors.length; j++) {
             final player1 = competitors[i];
             final player2 = competitors[j];
-            
+
             // Get user details
-            final player1Details = await FirebaseFirestore.instance
-                .collection('users')
-                .doc(player1['id'])
-                .get();
-            final player2Details = await FirebaseFirestore.instance
-                .collection('users')
-                .doc(player2['id'])
-                .get();
-            
-            final player1Name = player1Details.exists
-                ? '${player1Details.data()?['firstName'] ?? ''} ${player1Details.data()?['lastName'] ?? ''}'.trim()
-                : player1['name'] ?? 'Unknown';
-            final player2Name = player2Details.exists
-                ? '${player2Details.data()?['firstName'] ?? ''} ${player2Details.data()?['lastName'] ?? ''}'.trim()
-                : player2['name'] ?? 'Unknown';
-            
+            final player1Details =
+                await FirebaseFirestore.instance
+                    .collection('users')
+                    .doc(player1['id'])
+                    .get();
+            final player2Details =
+                await FirebaseFirestore.instance
+                    .collection('users')
+                    .doc(player2['id'])
+                    .get();
+
+            final player1Name =
+                player1Details.exists
+                    ? '${player1Details.data()?['firstName'] ?? ''} ${player1Details.data()?['lastName'] ?? ''}'
+                        .trim()
+                    : player1['name'] ?? 'Unknown';
+            final player2Name =
+                player2Details.exists
+                    ? '${player2Details.data()?['firstName'] ?? ''} ${player2Details.data()?['lastName'] ?? ''}'
+                        .trim()
+                    : player2['name'] ?? 'Unknown';
+
             teams.add({
               'teamId': 'team_${player1['id']}_${player2['id']}',
               'playerIds': [player1['id'], player2['id']],
               'playerNames': [player1Name, player2Name],
               'playerGenders': [
-                player1Details.data()?['gender']?.toString().toLowerCase() ?? 'unknown',
-                player2Details.data()?['gender']?.toString().toLowerCase() ?? 'unknown',
+                player1Details.data()?['gender']?.toString().toLowerCase() ??
+                    'unknown',
+                player2Details.data()?['gender']?.toString().toLowerCase() ??
+                    'unknown',
               ],
               'teamType': 'same_gender',
               'displayName': '$player1Name & $player2Name',
@@ -5328,7 +6022,7 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
           }
         }
       }
-      
+
       setState(() {
         availableTeams = teams;
       });
@@ -5343,8 +6037,9 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
 
   @override
   Widget build(BuildContext context) {
-    final competitorsList = widget.isDoubles ? availableTeams : widget.competitors;
-    
+    final competitorsList =
+        widget.isDoubles ? availableTeams : widget.competitors;
+
     return AlertDialog(
       backgroundColor: widget.cardBackground,
       shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
@@ -5354,18 +6049,15 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
           color: widget.textColor,
           fontWeight: FontWeight.bold,
         ),
+        overflow: TextOverflow.ellipsis,
       ),
-      content: SingleChildScrollView(
-        child: ConstrainedBox(
-          constraints: BoxConstraints(
-            maxWidth: MediaQuery.of(context).size.width * 0.85,
-            minWidth: 300.0,
-          ),
+      content: SizedBox(
+        width: MediaQuery.of(context).size.width * 0.9, // Dynamic width
+        child: SingleChildScrollView(
           child: Column(
             mainAxisSize: MainAxisSize.min,
             crossAxisAlignment: CrossAxisAlignment.start,
             children: [
-              // Event Info
               Container(
                 padding: const EdgeInsets.all(12),
                 decoration: BoxDecoration(
@@ -5380,7 +6072,10 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
                       style: GoogleFonts.poppins(
                         fontWeight: FontWeight.w600,
                         color: widget.accentColor,
+                        fontSize: 14,
                       ),
+                      overflow: TextOverflow.ellipsis,
+                      maxLines: 2,
                     ),
                     Text(
                       'Type: ${widget.selectedEvent.matchType}',
@@ -5388,6 +6083,7 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
                         fontSize: 12,
                         color: widget.secondaryText,
                       ),
+                      overflow: TextOverflow.ellipsis,
                     ),
                     if (widget.isMixed)
                       Text(
@@ -5397,75 +6093,98 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
                           color: widget.accentColor,
                           fontWeight: FontWeight.w500,
                         ),
+                        overflow: TextOverflow.ellipsis,
                       ),
                   ],
                 ),
               ),
-              
+
               const SizedBox(height: 16),
-              
+
               // Loading indicator for teams
               if (widget.isDoubles && isLoadingTeams)
                 const Center(child: CircularProgressIndicator()),
-              
+
               // Competitor/Team Selection
               if (!isLoadingTeams) ...[
                 DropdownButtonFormField<dynamic>(
                   decoration: InputDecoration(
-                    labelText: widget.isDoubles ? 'Select Team 1' : 'Select Player 1',
-                    labelStyle: GoogleFonts.poppins(color: widget.textColor.withOpacity(0.7)),
+                    labelText:
+                        widget.isDoubles ? 'Select Team 1' : 'Select Player 1',
+                    labelStyle: GoogleFonts.poppins(
+                      color: widget.textColor.withOpacity(0.7),
+                    ),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
                       borderSide: BorderSide(color: widget.accentColor),
                     ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
                   ),
                   isExpanded: true,
-                  items: competitorsList.map((competitor) {
-                    return DropdownMenuItem(
-                      value: competitor,
-                      child: Text(
-                        widget.isDoubles 
-                            ? competitor['displayName'] ?? 'Unknown Team'
-                            : competitor['name'] ?? competitor['id'],
-                        style: GoogleFonts.poppins(color: widget.textColor),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    );
-                  }).toList(),
+                  items:
+                      competitorsList.map((competitor) {
+                        return DropdownMenuItem(
+                          value: competitor,
+                          child: Text(
+                            widget.isDoubles
+                                ? competitor['displayName'] ?? 'Unknown Team'
+                                : competitor['name'] ?? competitor['id'],
+                            style: GoogleFonts.poppins(color: widget.textColor),
+                            overflow: TextOverflow.ellipsis,
+                          ),
+                        );
+                      }).toList(),
                   onChanged: (value) {
                     setState(() {
                       selectedCompetitor1 = value;
                     });
                   },
                 ),
-                
+
                 const SizedBox(height: 16),
-                
+
                 DropdownButtonFormField<dynamic>(
                   decoration: InputDecoration(
-                    labelText: widget.isDoubles ? 'Select Team 2' : 'Select Player 2',
-                    labelStyle: GoogleFonts.poppins(color: widget.textColor.withOpacity(0.7)),
+                    labelText:
+                        widget.isDoubles ? 'Select Team 2' : 'Select Player 2',
+                    labelStyle: GoogleFonts.poppins(
+                      color: widget.textColor.withOpacity(0.7),
+                    ),
                     border: OutlineInputBorder(
                       borderRadius: BorderRadius.circular(8),
                       borderSide: BorderSide(color: widget.accentColor),
                     ),
+                    contentPadding: const EdgeInsets.symmetric(
+                      horizontal: 12,
+                      vertical: 8,
+                    ),
                   ),
                   isExpanded: true,
-                  items: competitorsList.where((competitor) {
-                    // Exclude the already selected competitor
-                    return competitor != selectedCompetitor1;
-                  }).map((competitor) {
-                    return DropdownMenuItem(
-                      value: competitor,
-                      child: Text(
-                        widget.isDoubles 
-                            ? competitor['displayName'] ?? 'Unknown Team'
-                            : competitor['name'] ?? competitor['id'],
-                        style: GoogleFonts.poppins(color: widget.textColor),
-                        overflow: TextOverflow.ellipsis,
-                      ),
-                    );
-                  }).toList(),
+                  items:
+                      competitorsList
+                          .where((competitor) {
+                            // Exclude the already selected competitor
+                            return competitor != selectedCompetitor1;
+                          })
+                          .map((competitor) {
+                            return DropdownMenuItem(
+                              value: competitor,
+                              child: Text(
+                                widget.isDoubles
+                                    ? competitor['displayName'] ??
+                                        'Unknown Team'
+                                    : competitor['name'] ?? competitor['id'],
+                                style: GoogleFonts.poppins(
+                                  color: widget.textColor,
+                                ),
+                                overflow: TextOverflow.ellipsis,
+                              ),
+                            );
+                          })
+                          .toList(),
                   onChanged: (value) {
                     setState(() {
                       selectedCompetitor2 = value;
@@ -5473,68 +6192,49 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
                   },
                 ),
               ],
-              
+
               const SizedBox(height: 16),
-              
-              // Date and Time Selection
-              ListTile(
-                title: Text(
-                  'Date: ${DateFormat('MMM dd, yyyy').format(selectedDate)}',
-                  style: GoogleFonts.poppins(color: widget.textColor),
-                ),
-                trailing: Icon(Icons.calendar_today, color: widget.accentColor),
-                onTap: () async {
-                  final pickedDate = await showDatePicker(
-                    context: context,
-                    initialDate: selectedDate,
-                    firstDate: DateTime.now(),
-                    lastDate: DateTime.now().add(const Duration(days: 365)),
-                  );
-                  if (pickedDate != null) {
-                    setState(() {
-                      selectedDate = pickedDate;
-                    });
-                  }
-                },
-              ),
-              
-              ListTile(
-                title: Text(
-                  'Time: ${selectedTime.format(context)}',
-                  style: GoogleFonts.poppins(color: widget.textColor),
-                ),
-                trailing: Icon(Icons.access_time, color: widget.accentColor),
-                onTap: () async {
-                  final pickedTime = await showTimePicker(
-                    context: context,
-                    initialTime: selectedTime,
-                  );
-                  if (pickedTime != null) {
-                    setState(() {
-                      selectedTime = pickedTime;
-                    });
-                  }
-                },
-              ),
-              
-              const SizedBox(height: 16),
-              
+
               // Court and Time Slot Selection
-              Row(
+              Wrap(
+                spacing: 16,
+                runSpacing: 16,
                 children: [
-                  Expanded(
+                  SizedBox(
+                    width:
+                        MediaQuery.of(context).size.width >= 600
+                            ? (MediaQuery.of(context).size.width * 0.9 - 16) / 2
+                            : MediaQuery.of(context).size.width * 0.9,
                     child: DropdownButtonFormField<int>(
                       decoration: InputDecoration(
                         labelText: 'Court',
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
                       ),
                       value: selectedCourt,
-                      items: List.generate(widget.selectedEvent.numberOfCourts, (index) => index + 1)
-                          .map((court) => DropdownMenuItem(
-                                value: court,
-                                child: Text('Court $court'),
-                              ))
-                          .toList(),
+                      items:
+                          List.generate(
+                                widget.selectedEvent.numberOfCourts,
+                                (index) => index + 1,
+                              )
+                              .map(
+                                (court) => DropdownMenuItem(
+                                  value: court,
+                                  child: Text(
+                                    'Court $court',
+                                    style: GoogleFonts.poppins(
+                                      color: widget.textColor,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              )
+                              .toList(),
                       onChanged: (value) {
                         setState(() {
                           selectedCourt = value!;
@@ -5542,20 +6242,38 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
                       },
                     ),
                   ),
-                  const SizedBox(width: 16),
-                  Expanded(
+                  SizedBox(
+                    width:
+                        MediaQuery.of(context).size.width >= 600
+                            ? (MediaQuery.of(context).size.width * 0.9 - 16) / 2
+                            : MediaQuery.of(context).size.width * 0.9,
                     child: DropdownButtonFormField<String>(
                       decoration: InputDecoration(
                         labelText: 'Time Slot',
-                        border: OutlineInputBorder(borderRadius: BorderRadius.circular(8)),
+                        border: OutlineInputBorder(
+                          borderRadius: BorderRadius.circular(8),
+                        ),
+                        contentPadding: const EdgeInsets.symmetric(
+                          horizontal: 12,
+                          vertical: 8,
+                        ),
                       ),
                       value: selectedTimeSlot,
-                      items: widget.selectedEvent.timeSlots
-                          .map((slot) => DropdownMenuItem(
-                                value: slot,
-                                child: Text(slot),
-                              ))
-                          .toList(),
+                      items:
+                          widget.selectedEvent.timeSlots
+                              .map(
+                                (slot) => DropdownMenuItem(
+                                  value: slot,
+                                  child: Text(
+                                    slot,
+                                    style: GoogleFonts.poppins(
+                                      color: widget.textColor,
+                                    ),
+                                    overflow: TextOverflow.ellipsis,
+                                  ),
+                                ),
+                              )
+                              .toList(),
                       onChanged: (value) {
                         setState(() {
                           selectedTimeSlot = value!;
@@ -5575,6 +6293,7 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
           child: Text(
             'Cancel',
             style: GoogleFonts.poppins(color: widget.secondaryText),
+            overflow: TextOverflow.ellipsis,
           ),
         ),
         TextButton(
@@ -5585,26 +6304,19 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
                   content: Text(
                     'Please select both ${widget.isDoubles ? 'teams' : 'players'}',
                     style: GoogleFonts.poppins(),
+                    overflow: TextOverflow.ellipsis,
                   ),
                   backgroundColor: Colors.red,
                 ),
               );
               return;
             }
-            
+
             Navigator.pop(context);
-            final matchDateTime = DateTime(
-              selectedDate.year,
-              selectedDate.month,
-              selectedDate.day,
-              selectedTime.hour,
-              selectedTime.minute,
-            );
-            
+
             widget.onCreateMatch(
               selectedCompetitor1,
               selectedCompetitor2,
-              matchDateTime,
               selectedCourt,
               selectedTimeSlot,
             );
@@ -5615,9 +6327,693 @@ class _ManualMatchDialogState extends State<_ManualMatchDialog> {
               color: widget.successColor,
               fontWeight: FontWeight.w600,
             ),
+            overflow: TextOverflow.ellipsis,
           ),
         ),
       ],
     );
+  }
+}
+
+
+
+class _EditMatchDialog extends StatefulWidget {
+  final Map<String, dynamic> match;
+  final bool isDoubles;
+  final String tournamentId;
+  final String eventName;
+  final List<Map<String, dynamic>> participants;
+  final List<Map<String, dynamic>> availablePlayers;
+  final Function(Map<String, dynamic>) onSave;
+  final Color primaryColor;
+  final Color accentColor;
+  final Color textColor;
+  final Color secondaryText;
+  final Color cardBackground;
+  final Color successColor;
+
+  const _EditMatchDialog({
+    required this.match,
+    required this.isDoubles,
+    required this.tournamentId,
+    required this.eventName,
+    required this.participants,
+    required this.availablePlayers,
+    required this.onSave,
+    required this.primaryColor,
+    required this.accentColor,
+    required this.textColor,
+    required this.secondaryText,
+    required this.cardBackground,
+    required this.successColor,
+  });
+
+  @override
+  State<_EditMatchDialog> createState() => _EditMatchDialogState();
+}
+
+class _EditMatchDialogState extends State<_EditMatchDialog> {
+  dynamic editedPlayer1;
+  dynamic editedPlayer2;
+  dynamic editedTeam1;
+  dynamic editedTeam2;
+  int editedCourt = 1;
+  String editedTimeSlot = '';
+
+  @override
+  void initState() {
+    super.initState();
+    _initializeValues();
+  }
+
+  void _initializeValues() {
+    editedCourt = widget.match['court'] ?? 1;
+    editedTimeSlot = widget.match['timeSlot'] ?? '';
+    
+    if (widget.isDoubles) {
+      editedTeam1 = widget.match['team1'];
+      editedTeam2 = widget.match['team2'];
+    } else {
+      final isTBD1 = widget.match['wasTBD1'] == true;
+      final isTBD2 = widget.match['wasTBD2'] == true;
+      
+      editedPlayer1 = isTBD1 ? null : widget.match['player1Id'];
+      editedPlayer2 = isTBD2 ? null : widget.match['player2Id'];
+    }
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return Dialog(
+      backgroundColor: Colors.transparent,
+      insetPadding: const EdgeInsets.all(16),
+      child: Container(
+        constraints: BoxConstraints(
+          maxWidth: MediaQuery.of(context).size.width * 0.9,
+          maxHeight: MediaQuery.of(context).size.height * 0.8,
+        ),
+        decoration: BoxDecoration(
+          color: widget.cardBackground,
+          borderRadius: BorderRadius.circular(16),
+        ),
+        child: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            // Header
+            Container(
+              width: double.infinity,
+              padding: const EdgeInsets.fromLTRB(24, 24, 24, 16),
+              decoration: BoxDecoration(
+                color: widget.primaryColor.withOpacity(0.1),
+                borderRadius: const BorderRadius.vertical(top: Radius.circular(16)),
+              ),
+              child: Row(
+                children: [
+                  Icon(Icons.sports_tennis, color: widget.primaryColor),
+                  const SizedBox(width: 12),
+                  Expanded(
+                    child: Text(
+                      'Edit Match',
+                      style: GoogleFonts.poppins(
+                        color: widget.textColor,
+                        fontWeight: FontWeight.bold,
+                        fontSize: 18,
+                      ),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+            // Content
+            Flexible(
+              child: SingleChildScrollView(
+                padding: const EdgeInsets.all(24),
+                child: Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    if (widget.isDoubles) ...[
+                      _buildTeamSelector('Team 1', editedTeam1, (value) {
+                        setState(() => editedTeam1 = value);
+                      }, true),
+                      const SizedBox(height: 16),
+                      _buildTeamSelector('Team 2', editedTeam2, (value) {
+                        setState(() => editedTeam2 = value);
+                      }, false),
+                    ] else ...[
+                      _buildPlayerDisplay('Player 1', editedPlayer1, true),
+                      const SizedBox(height: 16),
+                      _buildPlayerDisplay('Player 2', editedPlayer2, false),
+                    ],
+                    const SizedBox(height: 16),
+                    _buildCourtSelector(),
+                    const SizedBox(height: 16),
+                    _buildTimeSlotSelector(),
+                  ],
+                ),
+              ),
+            ),
+            // Actions
+            Container(
+              padding: const EdgeInsets.all(16),
+              decoration: BoxDecoration(
+                border: Border(
+                  top: BorderSide(color: widget.secondaryText.withOpacity(0.1)),
+                ),
+              ),
+              child: Row(
+                mainAxisAlignment: MainAxisAlignment.end,
+                children: [
+                  TextButton(
+                    onPressed: () => Navigator.of(context).pop(),
+                    style: TextButton.styleFrom(
+                      foregroundColor: widget.secondaryText,
+                    ),
+                    child: Text(
+                      'Cancel',
+                      style: GoogleFonts.poppins(),
+                    ),
+                  ),
+                  const SizedBox(width: 12),
+                  ElevatedButton(
+                    onPressed: _saveChanges,
+                    style: ElevatedButton.styleFrom(
+                      backgroundColor: widget.successColor,
+                      foregroundColor: Colors.white,
+                    ),
+                    child: Text(
+                      'Save',
+                      style: GoogleFonts.poppins(fontWeight: FontWeight.w600),
+                    ),
+                  ),
+                ],
+              ),
+            ),
+          ],
+        ),
+      ),
+    );
+  }
+
+  Widget _buildPlayerDisplay(String label, dynamic currentPlayerId, bool isPlayer1) {
+    final isTBD = isPlayer1 ? widget.match['wasTBD1'] == true : widget.match['wasTBD2'] == true;
+    final playerName = isPlayer1 ? widget.match['player1'] : widget.match['player2'];
+
+    if (!isTBD) {
+      return _buildReadOnlyPlayerCard(label, playerName ?? 'Unknown Player', true);
+    } else {
+      return _buildPlayerSelector(label, currentPlayerId, (value) {
+        setState(() {
+          if (isPlayer1) {
+            editedPlayer1 = value;
+          } else {
+            editedPlayer2 = value;
+          }
+        });
+      }, isPlayer1);
+    }
+  }
+
+  Widget _buildReadOnlyPlayerCard(String label, String playerName, bool isAssigned) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text(
+              label,
+              style: GoogleFonts.poppins(
+                fontWeight: FontWeight.w600,
+                color: widget.textColor,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(width: 8),
+            if (isAssigned)
+              Icon(Icons.check_circle, color: widget.successColor, size: 16),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            border: Border.all(color: widget.secondaryText.withOpacity(0.3)),
+            borderRadius: BorderRadius.circular(8),
+            color: widget.cardBackground.withOpacity(0.5),
+          ),
+          child: Row(
+            children: [
+              CircleAvatar(
+                backgroundColor: widget.primaryColor,
+                radius: 20,
+                child: Text(
+                  playerName.substring(0, 1).toUpperCase(),
+                  style: GoogleFonts.poppins(
+                    color: Colors.white,
+                    fontSize: 14,
+                    fontWeight: FontWeight.w600,
+                  ),
+                ),
+              ),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      playerName,
+                      style: GoogleFonts.poppins(
+                        color: widget.textColor,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Text(
+                      'Already assigned',
+                      style: GoogleFonts.poppins(
+                        color: widget.secondaryText,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildPlayerSelector(String label, dynamic currentValue, Function(dynamic) onChanged, bool isPlayer1) {
+    List<DropdownMenuItem<dynamic>> playerItems = [];
+    
+    try {
+      playerItems = widget.availablePlayers.map((player) {
+        return DropdownMenuItem<dynamic>(
+          value: player,
+          child: _buildDropdownItem(player),
+        );
+      }).toList();
+    } catch (e) {
+      // Fallback if there's an error creating items
+      playerItems = [
+        DropdownMenuItem<dynamic>(
+          value: null,
+          child: _buildDropdownItem({'name': 'Error loading players', 'id': null}),
+        ),
+      ];
+    }
+
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: GoogleFonts.poppins(
+            fontWeight: FontWeight.w600,
+            color: widget.textColor,
+            fontSize: 14,
+          ),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          child: DropdownButtonFormField<dynamic>(
+            value: _getValidDropdownValue(currentValue),
+            decoration: InputDecoration(
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: widget.secondaryText.withOpacity(0.3)),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: widget.secondaryText.withOpacity(0.3)),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: widget.primaryColor, width: 2),
+              ),
+              filled: true,
+              fillColor: widget.cardBackground.withOpacity(0.5),
+              hintText: 'Assign Player to TBD',
+              hintStyle: GoogleFonts.poppins(
+                color: widget.secondaryText,
+                fontSize: 14,
+              ),
+              prefixIcon: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Icon(Icons.person_add, color: widget.secondaryText),
+              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+            ),
+            isExpanded: true,
+            items: playerItems,
+            onChanged: onChanged,
+            validator: (value) {
+              if (value == null) {
+                return 'Please assign a player';
+              }
+              return null;
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildDropdownItem(Map<String, dynamic> player) {
+    return Container(
+      constraints: const BoxConstraints(maxWidth: 200), // Fixed width constraint
+      padding: const EdgeInsets.symmetric(vertical: 4),
+      child: Row(
+        mainAxisSize: MainAxisSize.min,
+        children: [
+          CircleAvatar(
+            backgroundColor: widget.primaryColor,
+            radius: 16,
+            child: Text(
+              player['name']?.toString().substring(0, 1).toUpperCase() ?? '?',
+              style: GoogleFonts.poppins(
+                color: Colors.white,
+                fontSize: 12,
+                fontWeight: FontWeight.w600,
+              ),
+            ),
+          ),
+          const SizedBox(width: 12),
+          Flexible(
+            child: Text(
+              player['name'] ?? player['id']?.toString() ?? 'Unknown Player',
+              style: GoogleFonts.poppins(
+                color: widget.textColor,
+                fontSize: 14,
+              ),
+              overflow: TextOverflow.ellipsis,
+              maxLines: 1,
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  dynamic _getValidDropdownValue(dynamic currentValue) {
+    if (currentValue == null) return null;
+    
+    try {
+      return widget.availablePlayers.any((player) => 
+        player['id']?.toString() == currentValue?.toString()
+      ) ? currentValue : null;
+    } catch (e) {
+      return null;
+    }
+  }
+
+  Widget _buildTeamSelector(String label, dynamic currentValue, Function(dynamic) onChanged, bool isTeam1) {
+    final isTBD = isTeam1 ? widget.match['wasTBDTeam1'] == true : widget.match['wasTBDTeam2'] == true;
+    
+    if (!isTBD) {
+      return _buildReadOnlyTeamCard(label, true);
+    } else {
+      return _buildTBDTeamCard(label);
+    }
+  }
+
+  Widget _buildReadOnlyTeamCard(String label, bool isAssigned) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Row(
+          children: [
+            Text(
+              label,
+              style: GoogleFonts.poppins(
+                fontWeight: FontWeight.w600,
+                color: widget.textColor,
+                fontSize: 14,
+              ),
+            ),
+            const SizedBox(width: 8),
+            if (isAssigned)
+              Icon(Icons.check_circle, color: widget.successColor, size: 16),
+          ],
+        ),
+        const SizedBox(height: 12),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            border: Border.all(color: widget.secondaryText.withOpacity(0.3)),
+            borderRadius: BorderRadius.circular(8),
+            color: widget.cardBackground.withOpacity(0.5),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.group, color: widget.primaryColor, size: 20),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Column(
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(
+                      'Team Already Assigned',
+                      style: GoogleFonts.poppins(
+                        color: widget.textColor,
+                        fontWeight: FontWeight.w600,
+                        fontSize: 14,
+                      ),
+                      maxLines: 1,
+                      overflow: TextOverflow.ellipsis,
+                    ),
+                    Text(
+                      'No changes needed',
+                      style: GoogleFonts.poppins(
+                        color: widget.secondaryText,
+                        fontSize: 12,
+                      ),
+                    ),
+                  ],
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTBDTeamCard(String label) {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          label,
+          style: GoogleFonts.poppins(
+            fontWeight: FontWeight.w600,
+            color: widget.textColor,
+            fontSize: 14,
+          ),
+        ),
+        const SizedBox(height: 12),
+        Container(
+          width: double.infinity,
+          padding: const EdgeInsets.all(12),
+          decoration: BoxDecoration(
+            border: Border.all(color: Colors.orange.withOpacity(0.5)),
+            borderRadius: BorderRadius.circular(8),
+            color: Colors.orange.withOpacity(0.05),
+          ),
+          child: Row(
+            children: [
+              Icon(Icons.warning_amber, color: Colors.orange, size: 20),
+              const SizedBox(width: 12),
+              Expanded(
+                child: Text(
+                  'TBD - Team assignment needed',
+                  style: GoogleFonts.poppins(
+                    color: widget.textColor,
+                    fontWeight: FontWeight.w500,
+                    fontSize: 14,
+                  ),
+                  maxLines: 2,
+                  overflow: TextOverflow.ellipsis,
+                ),
+              ),
+            ],
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildCourtSelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Court',
+          style: GoogleFonts.poppins(
+            fontWeight: FontWeight.w600,
+            color: widget.textColor,
+            fontSize: 14,
+          ),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          child: DropdownButtonFormField<int>(
+            value: editedCourt,
+            decoration: InputDecoration(
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: widget.secondaryText.withOpacity(0.3)),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: widget.secondaryText.withOpacity(0.3)),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: widget.primaryColor, width: 2),
+              ),
+              filled: true,
+              fillColor: widget.cardBackground.withOpacity(0.5),
+              prefixIcon: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Icon(Icons.sports_tennis, color: widget.secondaryText),
+              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+            ),
+            isExpanded: true,
+            items: List.generate(10, (index) => index + 1).map((court) {
+              return DropdownMenuItem<int>(
+                value: court,
+                child: Text(
+                  'Court $court',
+                  style: GoogleFonts.poppins(
+                    color: widget.textColor,
+                    fontSize: 14,
+                  ),
+                ),
+              );
+            }).toList(),
+            onChanged: (value) {
+              if (value != null) {
+                setState(() => editedCourt = value);
+              }
+            },
+          ),
+        ),
+      ],
+    );
+  }
+
+  Widget _buildTimeSlotSelector() {
+    return Column(
+      crossAxisAlignment: CrossAxisAlignment.start,
+      children: [
+        Text(
+          'Time Slot',
+          style: GoogleFonts.poppins(
+            fontWeight: FontWeight.w600,
+            color: widget.textColor,
+            fontSize: 14,
+          ),
+        ),
+        const SizedBox(height: 12),
+        SizedBox(
+          width: double.infinity,
+          child: TextFormField(
+            initialValue: editedTimeSlot,
+            onChanged: (value) => setState(() => editedTimeSlot = value),
+            decoration: InputDecoration(
+              border: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: widget.secondaryText.withOpacity(0.3)),
+              ),
+              enabledBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: widget.secondaryText.withOpacity(0.3)),
+              ),
+              focusedBorder: OutlineInputBorder(
+                borderRadius: BorderRadius.circular(8),
+                borderSide: BorderSide(color: widget.primaryColor, width: 2),
+              ),
+              filled: true,
+              fillColor: widget.cardBackground.withOpacity(0.5),
+              hintText: 'e.g., 10:00 AM - 12:00 PM',
+              hintStyle: GoogleFonts.poppins(
+                color: widget.secondaryText,
+                fontSize: 14,
+              ),
+              prefixIcon: Padding(
+                padding: const EdgeInsets.all(12.0),
+                child: Icon(Icons.schedule, color: widget.secondaryText),
+              ),
+              contentPadding: const EdgeInsets.symmetric(horizontal: 12, vertical: 16),
+            ),
+            style: GoogleFonts.poppins(
+              color: widget.textColor,
+              fontSize: 14,
+            ),
+          ),
+        ),
+      ],
+    );
+  }
+
+  void _saveChanges() {
+    try {
+      final updatedMatch = Map<String, dynamic>.from(widget.match);
+      
+      if (widget.isDoubles) {
+        updatedMatch['wasTBDTeam1'] = editedTeam1 == null;
+        updatedMatch['wasTBDTeam2'] = editedTeam2 == null;
+      } else {
+        final isTBD1 = widget.match['wasTBD1'] == true;
+        final isTBD2 = widget.match['wasTBD2'] == true;
+        
+        if (isTBD1 && editedPlayer1 != null) {
+          updatedMatch['player1Id'] = editedPlayer1['id'];
+          updatedMatch['player1'] = editedPlayer1['name'];
+          updatedMatch['wasTBD1'] = false;
+        }
+        
+        if (isTBD2 && editedPlayer2 != null) {
+          updatedMatch['player2Id'] = editedPlayer2['id'];
+          updatedMatch['player2'] = editedPlayer2['name'];
+          updatedMatch['wasTBD2'] = false;
+        }
+        
+        if (!isTBD1) {
+          updatedMatch['player1Id'] = widget.match['player1Id'];
+          updatedMatch['player1'] = widget.match['player1'];
+          updatedMatch['wasTBD1'] = false;
+        }
+        
+        if (!isTBD2) {
+          updatedMatch['player2Id'] = widget.match['player2Id'];
+          updatedMatch['player2'] = widget.match['player2'];
+          updatedMatch['wasTBD2'] = false;
+        }
+      }
+      
+      updatedMatch['court'] = editedCourt;
+      updatedMatch['timeSlot'] = editedTimeSlot;
+      
+      widget.onSave(updatedMatch);
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    } catch (e) {
+      // Handle any errors silently
+      if (mounted) {
+        Navigator.of(context).pop();
+      }
+    }
   }
 }

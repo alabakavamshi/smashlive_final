@@ -1,5 +1,6 @@
 import 'package:flutter/material.dart';
 import 'package:game_app/models/tournament.dart';
+import 'package:game_app/widgets/timezone_utils.dart';
 import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:timezone/timezone.dart' as tz;
@@ -40,6 +41,10 @@ class _TournamentCardState extends State<TournamentCard> {
         widget.tournament.startDate, tz.getLocation(widget.tournament.timezone));
     final participantsText =
         '${selectedEvent.participants.length}/${selectedEvent.maxParticipants}';
+    
+    // Use TimezoneUtils to get the abbreviation
+    final timezoneAbbreviation = TimezoneUtils.getTimezoneAbbreviation(
+        widget.tournament.timezone);
 
     return LayoutBuilder(
       builder: (context, constraints) {
@@ -215,8 +220,9 @@ class _TournamentCardState extends State<TournamentCard> {
                     const SizedBox(height: 6),
                     _buildDetailRow(
                       icon: Icons.calendar_today,
+                      // Updated to use timezone abbreviation
                       text:
-                          '${DateFormat('MMM dd, yyyy').format(tz.TZDateTime.from(widget.tournament.startDate, tz.getLocation(widget.tournament.timezone)))} - ${DateFormat('MMM dd, yyyy').format(tz.TZDateTime.from(widget.tournament.endDate, tz.getLocation(widget.tournament.timezone)))} • ${DateFormat('h:mm a').format(startTime)} (${widget.tournament.timezone})',
+                          '${DateFormat('MMM dd, yyyy').format(tz.TZDateTime.from(widget.tournament.startDate, tz.getLocation(widget.tournament.timezone)))} - ${DateFormat('MMM dd, yyyy').format(tz.TZDateTime.from(widget.tournament.endDate, tz.getLocation(widget.tournament.timezone)))} • ${DateFormat('h:mm a').format(startTime)} ($timezoneAbbreviation)',
                       fontSize: detailFontSize,
                     ),
                     const SizedBox(height: 12),

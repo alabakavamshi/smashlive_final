@@ -1202,6 +1202,8 @@ PODS:
     - Firebase/Firestore (= 12.0.0)
     - firebase_core
     - Flutter
+  - connectivity_plus (0.0.1):
+    - Flutter
   - Firebase/Auth (12.0.0):
     - Firebase/CoreOnly
     - FirebaseAuth (~> 12.0.0)
@@ -1502,6 +1504,7 @@ PODS:
 
 DEPENDENCIES:
   - cloud_firestore (from `.symlinks/plugins/cloud_firestore/ios`)
+  - connectivity_plus (from `.symlinks/plugins/connectivity_plus/ios`)
   - Firebase/Auth (~> 12.0.0)
   - Firebase/Core (~> 12.0.0)
   - Firebase/Firestore (~> 12.0.0)
@@ -1563,6 +1566,8 @@ SPEC REPOS:
 EXTERNAL SOURCES:
   cloud_firestore:
     :path: ".symlinks/plugins/cloud_firestore/ios"
+  connectivity_plus:
+    :path: ".symlinks/plugins/connectivity_plus/ios"
   firebase_app_check:
     :path: ".symlinks/plugins/firebase_app_check/ios"
   firebase_auth:
@@ -1605,6 +1610,7 @@ SPEC CHECKSUMS:
   AppCheckCore: cc8fd0a3a230ddd401f326489c99990b013f0c4f
   BoringSSL-GRPC: dded2a44897e45f28f08ae87a55ee4bcd19bc508
   cloud_firestore: a824d9a55c9dffddf8de7c1e8fbcd66ca13f1624
+  connectivity_plus: cb623214f4e1f6ef8fe7403d580fdad517d2f7dd
   Firebase: 800d487043c0557d9faed71477a38d9aafb08a41
   firebase_app_check: 967c2ec2cf3d109d1ead13889994b62e3868d6d3
   firebase_auth: 4734e8223034e214039a9a805ff2cfb323223e34

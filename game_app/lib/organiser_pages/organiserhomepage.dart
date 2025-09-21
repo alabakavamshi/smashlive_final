@@ -1094,7 +1094,7 @@ Stream<List<Map<String, dynamic>>> _upcomingTournamentsStream() {
                               ),
                               const SizedBox(height: 4),
                               Text(
-                                'Entry: ₹${tournament['entryFee'].toStringAsFixed(0)}',
+                                'Entry: \$${tournament['entryFee'].toStringAsFixed(0)}',
                                 style: GoogleFonts.poppins(
                                   color: const Color(0xFF6C757D),
                                   fontSize: 12,

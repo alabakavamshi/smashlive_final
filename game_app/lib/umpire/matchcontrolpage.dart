@@ -6,7 +6,6 @@ import 'package:google_fonts/google_fonts.dart';
 import 'package:intl/intl.dart';
 import 'package:toastification/toastification.dart';
 import 'package:badges/badges.dart' as badges;
-import 'package:timezone/timezone.dart' as tz;
 import 'package:timezone/data/latest.dart' as tz;
 
 class MatchControlPage extends StatefulWidget {
@@ -42,19 +41,17 @@ class _MatchControlPageState extends State<MatchControlPage>
   late AnimationController _animationController;
   late Animation<double> _scaleAnimation;
   late Animation<double> _fadeAnimation;
-  tz.TZDateTime? _matchStartTime;
-  String? _countdown;
+  DateTime? _matchStartTime;
   Timer? _countdownTimer;
   bool _canStartMatch = false;
-  String? _tournamentTimezone;
-  String? _matchId; // Added to store matchId for subcollection reference
+  String? _matchId;
 
   @override
   void initState() {
     super.initState();
     tz.initializeTimeZones();
     _match = Map.from(widget.match);
-    _matchId = _match['matchId']; // Assuming match has 'matchId' field
+    _matchId = _match['matchId'];
     _initializeMatchStartTime().then((_) {
       _lastTeam1Score = _getCurrentScore(true);
       _lastTeam2Score = _getCurrentScore(false);
@@ -70,7 +67,7 @@ class _MatchControlPageState extends State<MatchControlPage>
       _fadeAnimation = Tween<double>(begin: 1.0, end: 0.0).animate(
         CurvedAnimation(parent: _animationController, curve: Curves.easeIn),
       );
-      _startCountdown();
+      _startCountdownUpdates();
       _checkMatchCompletion();
     });
   }
@@ -81,11 +78,8 @@ class _MatchControlPageState extends State<MatchControlPage>
           .collection('tournaments')
           .doc(widget.tournamentId)
           .get();
-      final data = tournamentDoc.data();
-      final timezoneName = data?['timezone'] as String? ?? 'UTC';
-      final timezone = tz.getLocation(timezoneName);
+      tournamentDoc.data();
 
-      // Get match start time from subcollection
       final matchDoc = await FirebaseFirestore.instance
           .collection('tournaments')
           .doc(widget.tournamentId)
@@ -94,21 +88,39 @@ class _MatchControlPageState extends State<MatchControlPage>
           .get();
       final matchData = matchDoc.data();
       final startTime = matchData?['startTime'] as Timestamp?;
+      final timeslot = matchData?['timeslot'] as String?;
 
       setState(() {
-        if (startTime != null) {
-          _matchStartTime = tz.TZDateTime.from(startTime.toDate(), timezone);
+        if (startTime != null && timeslot != null && RegExp(r'^\d{2}:\d{2}$').hasMatch(timeslot)) {
+          try {
+            final baseDateTime = startTime.toDate();
+            final timeFormat = DateFormat('HH:mm');
+            final parsedTime = timeFormat.parse(timeslot);
+            _matchStartTime = DateTime(
+              baseDateTime.year,
+              baseDateTime.month,
+              baseDateTime.day,
+              parsedTime.hour,
+              parsedTime.minute,
+            );
+            final now = DateTime.now();
+            if (_matchStartTime!.isBefore(now)) {
+              _matchStartTime = _matchStartTime!.add(const Duration(days: 1));
+            }
+          } catch (e) {
+            debugPrint('Error parsing timeslot: $e');
+            _matchStartTime = startTime.toDate();
+          }
+        } else if (startTime != null) {
+          _matchStartTime = startTime.toDate();
         } else {
-          final now = tz.TZDateTime.now(timezone).add(const Duration(minutes: 5));
-          _matchStartTime = now;
+          _matchStartTime = DateTime.now().add(const Duration(minutes: 5));
         }
-        _tournamentTimezone = timezoneName;
       });
     } catch (e) {
       debugPrint('Error initializing match start time: $e');
       setState(() {
-        _tournamentTimezone = 'UTC';
-        _matchStartTime = tz.TZDateTime.now(tz.UTC).add(const Duration(minutes: 5));
+        _matchStartTime = DateTime.now().add(const Duration(minutes: 5));
       });
     }
   }
@@ -120,55 +132,49 @@ class _MatchControlPageState extends State<MatchControlPage>
     super.dispose();
   }
 
-  void _startCountdown() {
-    if (_match['liveScores']?['isLive'] == true || _match['completed'] == true) {
-      setState(() {
-        _countdown = null;
-      });
-      _countdownTimer?.cancel();
-      return;
-    }
-    if (_matchStartTime == null || _tournamentTimezone == null) {
-      setState(() {
-        _countdown = 'Start time not scheduled';
-      });
-      _countdownTimer?.cancel();
-      return;
-    }
-    setState(() {
-      _countdown = null;
-    });
+  void _startCountdownUpdates() {
     _countdownTimer?.cancel();
     _countdownTimer = Timer.periodic(const Duration(seconds: 1), (timer) {
       if (!mounted) {
         timer.cancel();
         return;
       }
-      final now = tz.TZDateTime.now(tz.getLocation(_tournamentTimezone!));
-      final difference = _matchStartTime!.difference(now);
-      if (difference.isNegative) {
-        setState(() {
-          _countdown = 'Match should have started';
-          _canStartMatch = true;
-        });
-        timer.cancel();
-      } else if (difference.inHours >= 24) {
-        final days = difference.inDays;
-        final hours = (difference.inHours % 24) + (difference.inMinutes % 60 >= 30 ? 1 : 0); // Round up if minutes >= 30
-        setState(() {
-          _countdown = '${days}d ${hours}h';
-          _canStartMatch = false;
-        });
-      } else {
-        final hours = difference.inHours;
-        final minutes = difference.inMinutes % 60;
-        final seconds = difference.inSeconds % 60;
-        setState(() {
-          _countdown = '${hours}h ${minutes}m ${seconds}s';
-          _canStartMatch = false;
-        });
-      }
+      final countdown = _calculateCountdown();
+      setState(() {
+        _canStartMatch = countdown == 'Match should have started';
+      });
     });
+  }
+
+  String? _calculateCountdown() {
+    if (_match['liveScores']?['isLive'] == true || _match['completed'] == true) {
+      return null;
+    }
+    if (_matchStartTime == null) {
+      return 'Start time not scheduled';
+    }
+    final matchDateTime = _matchStartTime!;
+    final now = DateTime.now();
+    final difference = matchDateTime.difference(now);
+
+    
+    if (difference.isNegative) {
+      return 'Match should have started';
+    }
+
+    return _formatDuration(difference);
+  }
+
+  String _formatDuration(Duration duration) {
+    if (duration.inDays >= 1) {
+      return '${duration.inDays}d ${duration.inHours % 24}h ${duration.inMinutes % 60}m';
+    } else if (duration.inHours >= 1) {
+      return '${duration.inHours}h ${duration.inMinutes % 60}m ${duration.inSeconds % 60}s';
+    } else if (duration.inMinutes >= 1) {
+      return '${duration.inMinutes}m ${duration.inSeconds % 60}s';
+    } else {
+      return '${duration.inSeconds}s';
+    }
   }
 
   int _getCurrentScore(bool isTeam1) {
@@ -222,14 +228,33 @@ class _MatchControlPageState extends State<MatchControlPage>
           if (snapshot.exists && mounted) {
             final newMatch = snapshot.data()!;
             final newStartTime = newMatch['startTime'] as Timestamp?;
-            if (newStartTime != null && _tournamentTimezone != null) {
-              final timezone = tz.getLocation(_tournamentTimezone!);
-              final newStartTimeTZ = tz.TZDateTime.from(newStartTime.toDate(), timezone);
-              if (_matchStartTime != newStartTimeTZ) {
+            final newTimeslot = newMatch['timeslot'] as String?;
+            if (newStartTime != null) {
+              var newStartTimeLocal = newStartTime.toDate();
+              if (newTimeslot != null && RegExp(r'^\d{2}:\d{2}$').hasMatch(newTimeslot)) {
+                try {
+                  final timeFormat = DateFormat('HH:mm');
+                  final parsedTime = timeFormat.parse(newTimeslot);
+                  newStartTimeLocal = DateTime(
+                    newStartTimeLocal.year,
+                    newStartTimeLocal.month,
+                    newStartTimeLocal.day,
+                    parsedTime.hour,
+                    parsedTime.minute,
+                  );
+                  final now = DateTime.now();
+                  if (newStartTimeLocal.isBefore(now)) {
+                    newStartTimeLocal = newStartTimeLocal.add(const Duration(days: 1));
+                  }
+                } catch (e) {
+                  debugPrint('Error parsing new timeslot: $e');
+                }
+              }
+              if (_matchStartTime != newStartTimeLocal) {
                 setState(() {
-                  _matchStartTime = newStartTimeTZ;
+                  _matchStartTime = newStartTimeLocal;
                 });
-                _startCountdown();
+                _startCountdownUpdates();
               }
             }
             final newTeam1Score = _getCurrentScoreFromMatch(newMatch, true);
@@ -517,7 +542,6 @@ class _MatchControlPageState extends State<MatchControlPage>
         terminationReason = 'Match terminated manually without a winner';
       }
 
-      // Update tournament participants
       final tournamentDoc = await FirebaseFirestore.instance
           .collection('tournaments')
           .doc(widget.tournamentId)
@@ -550,7 +574,6 @@ class _MatchControlPageState extends State<MatchControlPage>
             .update({'participants': updatedParticipants});
       }
 
-      // Update match in subcollection
       await FirebaseFirestore.instance
           .collection('tournaments')
           .doc(widget.tournamentId)
@@ -637,8 +660,8 @@ class _MatchControlPageState extends State<MatchControlPage>
         );
         return;
       }
-      team1Scores.add(0); // Add new set score
-      team2Scores.add(0); // Add new set score
+      team1Scores.add(0);
+      team2Scores.add(0);
 
       await FirebaseFirestore.instance
           .collection('tournaments')
@@ -681,127 +704,141 @@ class _MatchControlPageState extends State<MatchControlPage>
       if (mounted) setState(() => _isLoading = false);
     }
   }
-
-  Widget _buildScoreDisplay() {
-    return Stack(
-      alignment: Alignment.center,
-      children: [
-        Row(
-          mainAxisAlignment: MainAxisAlignment.center,
-          children: [
-            badges.Badge(
-              showBadge: _currentServer == (widget.isDoubles ? 'team1' : 'player1'),
-              badgeStyle: const badges.BadgeStyle(
-                badgeColor: Color(0xFFF4A261),
-              ),
-              position: badges.BadgePosition.topEnd(end: -20, top: -10),
-              badgeContent:
-                  const Icon(Icons.sports_tennis, size: 12, color: Color(0xFFFDFCFB)),
-              child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
-                decoration: BoxDecoration(
-                  color: const Color(0xFFFFFFFF).withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(12),
-                ),
-                child: Text(
-                  '${_getCurrentScore(true)}',
-                  style: GoogleFonts.poppins(
-                    color: const Color(0xFFFDFCFB),
-                    fontSize: 42,
-                    fontWeight: FontWeight.bold,
-                  ),
-                ),
-              ),
+Widget _buildScoreDisplay() {
+  // Calculate the current scores
+  final team1Score = _getCurrentScore(true);
+  final team2Score = _getCurrentScore(false);
+  
+  return Stack(
+    alignment: Alignment.center,
+    children: [
+      Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          // Team 1 Score
+          badges.Badge(
+            showBadge: _currentServer == (widget.isDoubles ? 'team1' : 'player1'),
+            badgeStyle: const badges.BadgeStyle(
+              badgeColor: Color(0xFFF4A261),
             ),
-            Padding(
-              padding: const EdgeInsets.symmetric(horizontal: 8),
+            position: badges.BadgePosition.topEnd(end: -15, top: -8), // Adjusted position
+            badgeContent: const Icon(Icons.sports_tennis, size: 10, color: Color(0xFFFDFCFB)),
+            child: Container(
+              // Fixed width to handle double digits
+              width: 60, // Fixed width for consistent sizing
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFFFFF).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
               child: Text(
-                '-',
+                '$team1Score',
                 style: GoogleFonts.poppins(
-                  color: const Color(0xFFA8DADC),
-                  fontSize: 32,
+                  color: const Color(0xFFFDFCFB),
+                  fontSize: 36, // Reduced from 42 to 36
+                  fontWeight: FontWeight.bold,
                 ),
+                textAlign: TextAlign.center,
               ),
             ),
-            badges.Badge(
-              showBadge: _currentServer == (widget.isDoubles ? 'team2' : 'player2'),
-              badgeStyle: const badges.BadgeStyle(
-                badgeColor: Color(0xFFF4A261),
+          ),
+          // Dash separator with flexible spacing
+          Container(
+            width: 24, // Fixed width for the dash
+            alignment: Alignment.center,
+            child: Text(
+              '-',
+              style: GoogleFonts.poppins(
+                color: const Color(0xFFA8DADC),
+                fontSize: 28, // Slightly reduced from 32
               ),
-              position: badges.BadgePosition.topEnd(end: -20, top: -10),
-              badgeContent:
-                  const Icon(Icons.sports_tennis, size: 12, color: Color(0xFFFDFCFB)),
+            ),
+          ),
+          // Team 2 Score
+          badges.Badge(
+            showBadge: _currentServer == (widget.isDoubles ? 'team2' : 'player2'),
+            badgeStyle: const badges.BadgeStyle(
+              badgeColor: Color(0xFFF4A261),
+            ),
+            position: badges.BadgePosition.topEnd(end: -15, top: -8), // Adjusted position
+            badgeContent: const Icon(Icons.sports_tennis, size: 10, color: Color(0xFFFDFCFB)),
+            child: Container(
+              // Fixed width to handle double digits
+              width: 60, // Fixed width for consistent sizing
+              padding: const EdgeInsets.symmetric(horizontal: 4, vertical: 8),
+              alignment: Alignment.center,
+              decoration: BoxDecoration(
+                color: const Color(0xFFFFFFFF).withOpacity(0.1),
+                borderRadius: BorderRadius.circular(12),
+              ),
+              child: Text(
+                '$team2Score',
+                style: GoogleFonts.poppins(
+                  color: const Color(0xFFFDFCFB),
+                  fontSize: 36, // Reduced from 42 to 36
+                  fontWeight: FontWeight.bold,
+                ),
+                textAlign: TextAlign.center,
+              ),
+            ),
+          ),
+        ],
+      ),
+      // Plus one animations with adjusted positions
+      if (_showPlusOneTeam1)
+        Positioned(
+          left: 15, // Adjusted from 30 to prevent overflow
+          child: ScaleTransition(
+            scale: _scaleAnimation,
+            child: FadeTransition(
+              opacity: _fadeAnimation,
               child: Container(
-                padding: const EdgeInsets.symmetric(horizontal: 16, vertical: 8),
+                padding: const EdgeInsets.all(4), // Reduced padding
                 decoration: BoxDecoration(
-                  color: const Color(0xFFFFFFFF).withOpacity(0.1),
-                  borderRadius: BorderRadius.circular(12),
+                  color: const Color(0xFF2A9D8F).withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12), // Smaller radius
                 ),
                 child: Text(
-                  '${_getCurrentScore(false)}',
+                  '+1',
                   style: GoogleFonts.poppins(
-                    color: const Color(0xFFFDFCFB),
-                    fontSize: 42,
+                    color: const Color(0xFF2A9D8F),
+                    fontSize: 14, // Reduced from 16
                     fontWeight: FontWeight.bold,
                   ),
                 ),
               ),
             ),
-          ],
+          ),
         ),
-        if (_showPlusOneTeam1)
-          Positioned(
-            left: 30,
-            child: ScaleTransition(
-              scale: _scaleAnimation,
-              child: FadeTransition(
-                opacity: _fadeAnimation,
-                child: Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF2A9D8F).withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Text(
-                    '+1',
-                    style: GoogleFonts.poppins(
-                      color: const Color(0xFF2A9D8F),
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
+      if (_showPlusOneTeam2)
+        Positioned(
+          right: 15, // Adjusted from 30 to prevent overflow
+          child: ScaleTransition(
+            scale: _scaleAnimation,
+            child: FadeTransition(
+              opacity: _fadeAnimation,
+              child: Container(
+                padding: const EdgeInsets.all(4), // Reduced padding
+                decoration: BoxDecoration(
+                  color: const Color(0xFF2A9D8F).withOpacity(0.2),
+                  borderRadius: BorderRadius.circular(12), // Smaller radius
+                ),
+                child: Text(
+                  '+1',
+                  style: GoogleFonts.poppins(
+                    color: const Color(0xFF2A9D8F),
+                    fontSize: 14, // Reduced from 16
+                    fontWeight: FontWeight.bold,
                   ),
                 ),
               ),
             ),
           ),
-        if (_showPlusOneTeam2)
-          Positioned(
-            right: 30,
-            child: ScaleTransition(
-              scale: _scaleAnimation,
-              child: FadeTransition(
-                opacity: _fadeAnimation,
-                child: Container(
-                  padding: const EdgeInsets.all(6),
-                  decoration: BoxDecoration(
-                    color: const Color(0xFF2A9D8F).withOpacity(0.2),
-                    borderRadius: BorderRadius.circular(20),
-                  ),
-                  child: Text(
-                    '+1',
-                    style: GoogleFonts.poppins(
-                      color: const Color(0xFF2A9D8F),
-                      fontSize: 16,
-                      fontWeight: FontWeight.bold,
-                    ),
-                  ),
-                ),
-              ),
-            ),
-          ),
-      ],
-    );
-  }
+        ),
+    ],
+  );
+}
 
   Widget _buildActionButtons() {
     return Column(
@@ -1077,9 +1114,9 @@ class _MatchControlPageState extends State<MatchControlPage>
                             ),
                             textAlign: TextAlign.center,
                           ),
-                          if (_matchStartTime != null && _tournamentTimezone != null)
+                          if (_matchStartTime != null)
                             Text(
-                              '${DateFormat('MMM dd, yyyy HH:mm').format(_matchStartTime!)} ($_tournamentTimezone)',
+                              DateFormat('MMM dd, yyyy HH:mm').format(_matchStartTime!),
                               style: GoogleFonts.poppins(
                                 color: const Color(0xFFA8DADC),
                                 fontSize: 12,
@@ -1319,18 +1356,7 @@ class _MatchControlPageState extends State<MatchControlPage>
                           child: (!isLive)
                               ? Column(
                                   children: [
-                                    if (_countdown != null)
-                                      Padding(
-                                        padding: const EdgeInsets.only(bottom: 8),
-                                        child: Text(
-                                          'Countdown: $_countdown',
-                                          style: GoogleFonts.poppins(
-                                            color: const Color(0xFFA8DADC),
-                                            fontSize: 14,
-                                          ),
-                                          textAlign: TextAlign.center,
-                                        ),
-                                      ),
+                                    
                                     _buildModernButton(
                                       text: _isLoading
                                           ? 'Starting...'
