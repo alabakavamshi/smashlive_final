@@ -73,6 +73,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
   late AnimationController _animationController;
   late Animation<double> _fadeAnimation;
   late Animation<Offset> _slideAnimation;
+  String _fullAddress = '';
   Timer? _debounceTimer;
   String _selectedTimezone = 'UTC';
   File? _profileImage;
@@ -435,18 +436,45 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
     });
   }
 
-  void _handleCitySelection(String city) {
-    setState(() {
-      _cityController.text = city;
-      _isCityValid = true;
-      _selectedTimezone = _getTimezoneForCity(city.toLowerCase());
-      _citySuggestions = []; // Clear suggestions immediately
-    });
-    
-    _validateCityWithGeocoding(city);
-    _removeOverlay();
-    _cityFocusNode.unfocus();
+  void _handleCitySelection(String city) async {
+  setState(() {
+    _cityController.text = city;
+    _isCityValid = true;
+    _selectedTimezone = _getTimezoneForCity(city.toLowerCase());
+    _citySuggestions = [];
+  });
+  
+  await _validateCityWithGeocoding(city);
+  await _fetchFullAddress(city); 
+  _removeOverlay();
+  _cityFocusNode.unfocus();
+}
+
+
+
+Future<void> _fetchFullAddress(String city) async {
+  try {
+    final locations = await locationFromAddress(city);
+    if (locations.isNotEmpty) {
+      final place = locations.first;
+      final placemarks = await placemarkFromCoordinates(
+        place.latitude,
+        place.longitude,
+      );
+      
+      if (placemarks.isNotEmpty) {
+        final placemark = placemarks.first;
+        final country = placemark.country ?? '';
+        // Store the full address including country
+        _fullAddress = '$city, $country';
+      }
+    }
+  } catch (e) {
+    print('Error fetching full address: $e');
+    _fullAddress = city; // Fallback to just city
   }
+}
+
 
   Future<void> _validateCityWithGeocoding(String city) async {
     if (city.isEmpty) {
@@ -973,7 +1001,7 @@ class _CreateTournamentPageState extends State<CreateTournamentPage> with Single
           MaterialPageRoute(
             builder: (context) => OrganizerHomePage(
               initialIndex: 2,
-              userCity: _cityController.text.trim(),
+              userCity: _fullAddress.isNotEmpty ? _fullAddress : _cityController.text.trim(),
             ),
           ),
         );

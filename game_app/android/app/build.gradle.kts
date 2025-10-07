@@ -17,7 +17,7 @@ val keystoreProperties = Properties().apply {
 }
 
 android {
-    namespace = "com.SmashLive.game_app"
+    namespace = "com.smashlive.game_app"
     compileSdk = 35
     ndkVersion = "27.0.12077973"
 
@@ -25,7 +25,7 @@ android {
         applicationId = "com.smashlive.gameapp"
         minSdk = 23
         targetSdk = 35
-        versionCode = 8
+        versionCode = 13
         versionName = "1.0.0"
         multiDexEnabled = true
     }

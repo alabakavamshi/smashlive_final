@@ -29,7 +29,7 @@ class _CourtCreationPageState extends State<CourtCreationPage> {
   bool _isCityValid = false;
   bool _isLoadingLocation = false;
   bool _locationFetchCompleted = false;
-  String _location = ''; // Local location to override widget.userCity
+  String _location = ''; 
 // Track if user has set a location
   String? _selectedCourtType;
   final List<String> _courtTypes = ['Indoor', 'Outdoor', 'Synthetic'];

@@ -82,7 +82,7 @@ void initState() {
     _initializeServer();
     _listenToMatchUpdates();
     _loadTournamentSettings();
-    _startCountdown(); // Start countdown AFTER timezone is initialized
+    _startCountdown(); 
   });
   
   _animationController = AnimationController(

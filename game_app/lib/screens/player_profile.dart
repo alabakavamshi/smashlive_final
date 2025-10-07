@@ -19,7 +19,7 @@ import 'package:image_picker/image_picker.dart';
 import 'package:firebase_storage/firebase_storage.dart';
 import 'package:path/path.dart' as path;
 
-// Enhanced Profile Information Page with better UX
+
 class EnhancedProfileInformationPage extends StatefulWidget {
   final User user;
   final AppUser appUser;
